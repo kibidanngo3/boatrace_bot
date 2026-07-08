@@ -7,13 +7,11 @@
 """
 import argparse
 import csv
-import re
+import json
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 PREDICTION_LOG_FILE = BASE_DIR / "predictions.csv"
-
-TICKET_RE = re.compile(r"([1-6]-[1-6]-[1-6])\((\d+(?:\.\d+)?)倍/EV(\d+(?:\.\d+)?)(?:/¥[\d,]+)?\)")
 
 
 def load_rows():
@@ -21,8 +19,13 @@ def load_rows():
         return list(csv.DictReader(f))
 
 
-def parse_ticket_evs(tickets_field):
-    return [(t, float(odds), float(ev)) for t, odds, ev in TICKET_RE.findall(tickets_field or "")]
+def parse_ticket_details(row):
+    """{ticket: {odds, probability, expected_value, stake}} のJSONをパースする。"""
+    try:
+        details = json.loads(row.get("ticket_details") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return details
 
 
 def summarize(rows, label):
@@ -43,14 +46,15 @@ def summarize(rows, label):
 
 
 def simulate_ev_threshold(rows, thresholds):
-    print("\n--- EV閾値シミュレーション (実際のオッズ・結果を使って再集計) ---")
+    print("\n--- EV閾値シミュレーション (実際のオッズ・結果を使って再集計、賭け金は100円均等と仮定) ---")
     for th in thresholds:
         stake = 0
         ret = 0
         hits = 0
         count = 0
         for r in rows:
-            picked = [t for t, odds, ev in parse_ticket_evs(r.get("tickets", "")) if ev >= th]
+            details = parse_ticket_details(r)
+            picked = [t for t, d in details.items() if d.get("expected_value", 0) >= th]
             if not picked:
                 continue
             count += 1

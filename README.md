@@ -39,14 +39,28 @@ cron-job.orgに登録しているGitHubのFine-grained PATは **2026年10月6日
 
 - `main.py`の定数（変更する場合はここを編集する）
   - `STARTING_BANKROLL = 10000`: 初期バンクロール（円）
-  - `KELLY_FRACTION = 0.5`: 半分ケリー（フルケリーは変動が大きいため）
-  - `MAX_RACE_STAKE_RATIO = 0.3`: 1レースあたりの賭け金上限（バンクロールの30%、モデル誤差による過大ベットの安全弁）
-- 現在のバンクロールはレース結果が決着するたびに損益を反映して`bot_state.json`の`current_bankroll`に保存される（GitHub Actionsのキャッシュに永続化）
-- バンクロールを手動でリセットしたい場合は、cron-job.orgでのTest run後にActionsのキャッシュを削除するか、`bot_state.json`の`current_bankroll`を直接書き換える
+  - `KELLY_FRACTION = 0.25`: 1/4ケリー（モデル誤差を考慮して保守的に）
+  - `MAX_RACE_STAKE_RATIO = 0.10`: 1レースあたりの賭け金上限（バンクロールの10%）
+  - `DAILY_LOSS_LIMIT_RATIO = 0.20`: その日の損失がバンクロールの20%に達したら以降の新規ベットを停止（決済・サマリー送信は継続）
+  - `LOSING_STREAK_THRESHOLD = 3` / `LOSING_STREAK_KELLY_MULTIPLIER = 0.5`: 3連敗したらケリー係数を半分に縮小し、勝つまで維持
+- 現在のバンクロール・その日の開始時点バンクロール・連敗数は`bot_state.json`に保存される
+- バンクロールを手動でリセットしたい場合は、後述の`bot-state`ブランチ上の`bot_state.json`を直接編集する
+
+## 状態の永続化 (predictions.csv / bot_state.json)
+
+これらは`main`ブランチにはコミットされず（`.gitignore`対象）、専用の**`bot-state`ブランチ**に毎回コミットされる形で永続化している。GitHub Actionsの`actions/cache`はビルドキャッシュ用途のものでいつ消えても文句を言えない仕組みのため、金銭に関わる状態の保存先としては使っていない。
+
+- ワークフロー実行のたびに`bot-state`ブランチから最新の状態を取得 → 実行 → 更新分を`bot-state`ブランチにコミット&プッシュ、という流れ
+- 過去の状態はすべて`bot-state`ブランチのコミット履歴として残るので、`git log`でバンクロールの推移などを後から追跡できる
+- 手元で最新の`predictions.csv`を見たい場合は以下で取得できる
+  ```
+  git fetch origin bot-state
+  git show origin/bot-state:predictions.csv > predictions.csv
+  ```
 
 ## バックテスト
 
-蓄積した`predictions.csv`を使って成績・EV閾値ごとの回収率を確認できる。
+蓄積した`predictions.csv`を使って成績・EV閾値ごとの回収率を確認できる。上記の方法で`bot-state`ブランチから最新の`predictions.csv`を取得してから実行する。
 
 ```
 python scripts/backtest.py

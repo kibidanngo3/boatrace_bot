@@ -35,8 +35,11 @@ SCHEDULE_FAILURE_ALERT_THRESHOLD = 3
 SCHEDULE_FAILURE_ALERT_INTERVAL = 3
 
 STARTING_BANKROLL = 10000  # 元手資金 (円)
-KELLY_FRACTION = 0.5       # 半分ケリー
-MAX_RACE_STAKE_RATIO = 0.3  # 1レースあたりの賭け金上限 (バンクロールに対する比率)
+KELLY_FRACTION = 0.25      # 1/4ケリー (モデル誤差を考慮して保守的に)
+MAX_RACE_STAKE_RATIO = 0.10  # 1レースあたりの賭け金上限 (バンクロールに対する比率)
+DAILY_LOSS_LIMIT_RATIO = 0.20    # その日の損失がバンクロールの20%に達したら以降ベット停止
+LOSING_STREAK_THRESHOLD = 3     # 3連敗で
+LOSING_STREAK_KELLY_MULTIPLIER = 0.5  # ケリー係数を半分に縮小
 
 PREDICTION_LOG_FIELDS = [
     "run_at",
@@ -57,7 +60,7 @@ PREDICTION_LOG_FIELDS = [
     "ticket_count",
     "max_expected_value",
     "tickets",
-    "ticket_stakes",
+    "ticket_details",
     "bankroll_at_bet",
     "reason",
     "result_ticket",
@@ -166,7 +169,7 @@ def save_prediction_log(race_id, race, result, run_at):
         "ticket_count": result["点数"],
         "max_expected_value": "" if result["期待値MAX"] is None else f"{result['期待値MAX']:.6f}",
         "tickets": result["買い目"],
-        "ticket_stakes": json.dumps(result.get("買い目内訳", {}), ensure_ascii=False),
+        "ticket_details": json.dumps(result.get("買い目内訳", {}), ensure_ascii=False),
         "bankroll_at_bet": result.get("バンクロール", ""),
         "reason": result["根拠"],
     }
@@ -236,18 +239,23 @@ def settle_prediction_logs(scraper, now_jst, state):
             continue
 
         try:
-            ticket_stakes = json.loads(row.get("ticket_stakes") or "{}")
+            ticket_details = json.loads(row.get("ticket_details") or "{}")
         except (json.JSONDecodeError, TypeError):
-            ticket_stakes = {}
+            ticket_details = {}
 
-        stake = sum(ticket_stakes.values())
-        is_hit = result["ticket"] in ticket_stakes
-        matched_stake = ticket_stakes.get(result["ticket"], 0)
+        stake = sum(detail.get("stake", 0) for detail in ticket_details.values())
+        is_hit = result["ticket"] in ticket_details
+        matched_stake = ticket_details.get(result["ticket"], {}).get("stake", 0)
         return_amount = int(matched_stake / STAKE_PER_TICKET * result["payout"]) if is_hit else 0
         profit = return_amount - stake
         roi = (return_amount / stake) if stake else 0
 
         state["current_bankroll"] = state.get("current_bankroll", STARTING_BANKROLL) + profit
+        if stake > 0:
+            if is_hit:
+                state["consecutive_losses"] = 0
+            else:
+                state["consecutive_losses"] = state.get("consecutive_losses", 0) + 1
 
         row.update({
             "result_ticket": result["ticket"],
@@ -456,24 +464,35 @@ class BoatRaceScraperV5:
         if not m:
             return {}
 
-        vals = re.findall(r"\d+(?:\.\d+)?", m.group(1))
-        if len(vals) < 13:
+        # 新人選手などは平均STが "-" (未計測) で表示される。
+        # 数値だけを正規表現で拾うと "-" が読み飛ばされ後続の値が1つずつズレるため、
+        # 空白区切りのトークン単位でパースし、数値化できないものは0.0として扱う。
+        tokens = m.group(1).split()
+        if len(tokens) < 13:
             return {}
 
+        def to_float(token):
+            try:
+                return float(token)
+            except ValueError:
+                return 0.0
+
+        vals = [to_float(t) for t in tokens[:13]]
+
         return {
-            "avg_st": float(vals[0]),
-            "national_win_rate": float(vals[1]),
-            "national_2_rate": float(vals[2]),
-            "national_3_rate": float(vals[3]),
-            "local_win_rate": float(vals[4]),
-            "local_2_rate": float(vals[5]),
-            "local_3_rate": float(vals[6]),
+            "avg_st": vals[0],
+            "national_win_rate": vals[1],
+            "national_2_rate": vals[2],
+            "national_3_rate": vals[3],
+            "local_win_rate": vals[4],
+            "local_2_rate": vals[5],
+            "local_3_rate": vals[6],
             "motor_no": int(vals[7]),
-            "motor_2_rate": float(vals[8]),
-            "motor_3_rate": float(vals[9]),
+            "motor_2_rate": vals[8],
+            "motor_3_rate": vals[9],
             "boat_no": int(vals[10]),
-            "boat_2_rate": float(vals[11]),
-            "boat_3_rate": float(vals[12]),
+            "boat_2_rate": vals[11],
+            "boat_3_rate": vals[12],
         }
 
     def fetch_all_venue_schedules(self, date_str):
@@ -809,7 +828,7 @@ def add_expected_values(tickets, probs, odds_map, strategy):
     enriched.sort(key=lambda x: x["expected_value"], reverse=True)
     return enriched[:MAX_TICKET_COUNT.get(strategy, 8)]
 
-def add_kelly_stakes(value_tickets, bankroll):
+def add_kelly_stakes(value_tickets, bankroll, kelly_fraction=KELLY_FRACTION):
     """複数の排反な買い目に同時に賭ける場合のケリー基準 (Thorpの一般化式)。
     odds はグロス配当 (100円が odds*100円になる) なので、ネットオッズ b = odds - 1 を使う。
     f_i = p_i - (1 - ΣP) / b_i
@@ -826,7 +845,7 @@ def add_kelly_stakes(value_tickets, bankroll):
             item["stake"] = 0
             continue
         edge = item["probability"] - (1 - total_prob) / net_odds
-        fraction = max(edge, 0.0) * KELLY_FRACTION
+        fraction = max(edge, 0.0) * kelly_fraction
         raw_stake = bankroll * fraction
         item["stake"] = int(raw_stake // STAKE_PER_TICKET) * STAKE_PER_TICKET
 
@@ -841,7 +860,7 @@ def add_kelly_stakes(value_tickets, bankroll):
 
 # 2. 予測ロジック
 # ==========================================
-def predict_single(model, config, scraper, course, rno, date_str, bankroll, race_url=None, deadline=None):
+def predict_single(model, config, scraper, course, rno, date_str, bankroll, kelly_fraction=KELLY_FRACTION, race_url=None, deadline=None):
     try:
         data = scraper.fetch_race_data(course, rno, date_str, race_url=race_url, deadline=deadline)
         if not data: 
@@ -907,9 +926,9 @@ def predict_single(model, config, scraper, course, rno, date_str, bankroll, race
             print(f"  - {course} {rno}R: No tickets over EV {MIN_EXPECTED_VALUE:.2f}")
             return None, 0
 
-        ticket_stakes = {}
+        ticket_details = {}
         if value_tickets:
-            value_tickets = add_kelly_stakes(value_tickets, bankroll)
+            value_tickets = add_kelly_stakes(value_tickets, bankroll, kelly_fraction)
             staked_tickets = [item for item in value_tickets if item["stake"] > 0]
             if not staked_tickets:
                 print(f"  - {course} {rno}R: Kelly stake is 0 for all tickets (skip)")
@@ -921,7 +940,15 @@ def predict_single(model, config, scraper, course, rno, date_str, bankroll, race
             )
             ticket_count = len(staked_tickets)
             max_ev = max(item["expected_value"] for item in staked_tickets)
-            ticket_stakes = {item["ticket"]: item["stake"] for item in staked_tickets}
+            ticket_details = {
+                item["ticket"]: {
+                    "odds": item["odds"],
+                    "probability": item["probability"],
+                    "expected_value": item["expected_value"],
+                    "stake": item["stake"],
+                }
+                for item in staked_tickets
+            }
         else:
             ticket_text = " / ".join(tickets)
             ticket_count = len(tickets)
@@ -941,7 +968,7 @@ def predict_single(model, config, scraper, course, rno, date_str, bankroll, race
             "全体ランキング": all_ranking,
             "根拠": f"1号艇:{data['rank_1']} / 展示:{int(input_dict['ex_rank_1'])}位",
             "買い目": ticket_text,
-            "買い目内訳": ticket_stakes,
+            "買い目内訳": ticket_details,
             "バンクロール": bankroll,
             "点数": ticket_count,
             "期待値MAX": max_ev,
@@ -964,6 +991,19 @@ def scan_and_notify(model, config, scraper, now_jst, date_str, run_at, state):
     if bankroll < STAKE_PER_TICKET:
         print(f"  💸 Bankroll too low to bet ({bankroll}円). Skipping.")
         return 0
+
+    day_start_bankroll = state.get("day_start_bankroll", bankroll)
+    if day_start_bankroll > 0:
+        daily_loss_ratio = (day_start_bankroll - bankroll) / day_start_bankroll
+        if daily_loss_ratio >= DAILY_LOSS_LIMIT_RATIO:
+            print(f"  🛑 Daily loss limit reached ({daily_loss_ratio:.1%} >= {DAILY_LOSS_LIMIT_RATIO:.0%}). Skipping for today.")
+            return 0
+
+    consecutive_losses = state.get("consecutive_losses", 0)
+    kelly_fraction = KELLY_FRACTION
+    if consecutive_losses >= LOSING_STREAK_THRESHOLD:
+        kelly_fraction *= LOSING_STREAK_KELLY_MULTIPLIER
+        print(f"  📉 {consecutive_losses}連敗中: ケリー係数を{kelly_fraction:.3f}に縮小")
 
     # 1. 1日の全スケジュールを取得 (初回、または1時間ごとに更新すると効率的)
     all_races = scraper.fetch_all_venue_schedules(date_str)
@@ -1015,7 +1055,7 @@ def scan_and_notify(model, config, scraper, now_jst, date_str, run_at, state):
         race_id = race['id']
 
         print(f"  - {course} {rno}R: Analyzing... (Deadline: {race['time']})")
-        res, status = predict_single(model, config, scraper, course, rno, date_str, bankroll, race_url=race['url'], deadline=race['time'])
+        res, status = predict_single(model, config, scraper, course, rno, date_str, bankroll, kelly_fraction=kelly_fraction, race_url=race['url'], deadline=race['time'])
 
         if status == 1:
             hit_count += 1
@@ -1037,7 +1077,7 @@ def scan_and_notify(model, config, scraper, now_jst, date_str, run_at, state):
                 content += f"📈 最大期待値: `{res['期待値MAX']:.2f}`\n"
             content += f"📝 根拠: {res['根拠']}\n💰 推奨({res['点数']}点): `{res['買い目']}`\n"
             if res.get("買い目内訳"):
-                total_stake = sum(res["買い目内訳"].values())
+                total_stake = sum(detail["stake"] for detail in res["買い目内訳"].values())
                 content += f"💴 合計賭け金: `{total_stake:,}円` (バンクロール `{res['バンクロール']:,}円` 基準)\n"
             content += "━━━━━━━━━━━━━━━━━━━━"
 
@@ -1063,10 +1103,15 @@ def run_live_patrol():
 
     scraper = BoatRaceScraperV5()
     settled_count = settle_prediction_logs(scraper, run_at, state)
-    save_state(state)
 
     now_jst = datetime.now(JST)
     date_str = now_jst.strftime("%Y%m%d")
+
+    if state.get("bankroll_day") != date_str:
+        state["day_start_bankroll"] = state["current_bankroll"]
+        state["bankroll_day"] = date_str
+
+    save_state(state)
 
     hit_count = 0
     if OPERATING_HOUR_START <= now_jst.hour < OPERATING_HOUR_END:

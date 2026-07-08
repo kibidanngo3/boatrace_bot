@@ -1,7 +1,7 @@
 name: My Boatrace Patrol
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: boatrace-patrol
@@ -40,16 +40,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Restore bot state
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            predictions.csv
-            notified_races.log
-            bot_state.json
-          key: bot-state-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: |
-            bot-state-
+      - name: Restore bot state from bot-state branch
+        run: |
+          git fetch origin bot-state 2>/dev/null || echo "bot-state branch not found yet"
+          for f in predictions.csv notified_races.log bot_state.json; do
+            git show origin/bot-state:$f > "$f" 2>/dev/null && echo "  restored $f" || echo "  (no $f yet)"
+          done
 
       - name: Run Patrol
         env:
@@ -62,15 +58,28 @@ jobs:
         run: |
           touch predictions.csv notified_races.log bot_state.json
 
-      - name: Save bot state
+      - name: Save bot state to bot-state branch
         if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            predictions.csv
-            notified_races.log
-            bot_state.json
-          key: bot-state-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          git config user.name "boatrace-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git fetch origin bot-state 2>/dev/null || true
+          if git rev-parse --verify origin/bot-state >/dev/null 2>&1; then
+            git worktree add state-worktree -B bot-state origin/bot-state
+          else
+            git worktree add state-worktree -B bot-state
+          fi
+          for f in predictions.csv notified_races.log bot_state.json; do
+            [ -f "$f" ] && cp "$f" state-worktree/
+          done
+          cd state-worktree
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m "Update bot state"
+            git push origin HEAD:bot-state
+          else
+            echo "no state changes to commit"
+          fi
 
       - name: Upload prediction log
         if: always()
