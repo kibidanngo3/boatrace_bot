@@ -57,6 +57,29 @@ PREDICTION_LOG_FIELDS = [
     "settled_at",
 ]
 
+EXTRA_FEATURE_FIELDS = []
+for boat_no in range(1, 7):
+    EXTRA_FEATURE_FIELDS.extend([
+        f"avg_st_{boat_no}",
+        f"national_win_rate_{boat_no}",
+        f"national_2_rate_{boat_no}",
+        f"national_3_rate_{boat_no}",
+        f"local_win_rate_{boat_no}",
+        f"local_2_rate_{boat_no}",
+        f"local_3_rate_{boat_no}",
+        f"motor_no_{boat_no}",
+        f"motor_2_rate_{boat_no}",
+        f"motor_3_rate_{boat_no}",
+        f"boat_no_{boat_no}",
+        f"boat_2_rate_{boat_no}",
+        f"boat_3_rate_{boat_no}",
+        f"weight_{boat_no}",
+        f"tilt_{boat_no}",
+        f"parts_count_{boat_no}",
+        f"parts_{boat_no}",
+    ])
+PREDICTION_LOG_FIELDS.extend(EXTRA_FEATURE_FIELDS)
+
 IN_JUMP_THRESHOLD = 0.55
 FOCUS_TOP_THRESHOLD = 0.35
 STANDARD_TOP_THRESHOLD = 0.25
@@ -103,6 +126,13 @@ def save_prediction_log(race_id, race, result, run_at):
         "tickets": result["買い目"],
         "reason": result["根拠"],
     }
+    feature_data = result.get("特徴量", {})
+    for field in EXTRA_FEATURE_FIELDS:
+        value = feature_data.get(field, "")
+        if isinstance(value, float):
+            row[field] = f"{value:.6f}"
+        else:
+            row[field] = value
 
     normalize_prediction_log_header()
     file_exists = PREDICTION_LOG_FILE.exists()
@@ -330,6 +360,38 @@ class BoatRaceScraperV5:
         m = re.search(r"\d+(?:\.\d+)?", value or "")
         return float(m.group(0)) if m else default
 
+    @staticmethod
+    def _to_signed_float(value, default=0.0):
+        m = re.search(r"[+-]?\d+(?:\.\d+)?", value or "")
+        return float(m.group(0)) if m else default
+
+    @staticmethod
+    def _parse_entry_features(text):
+        text = " ".join((text or "").split())
+        m = re.search(r"kg\s+F\d+\s+L\d+\s+(.+)", text)
+        if not m:
+            return {}
+
+        vals = re.findall(r"\d+(?:\.\d+)?", m.group(1))
+        if len(vals) < 13:
+            return {}
+
+        return {
+            "avg_st": float(vals[0]),
+            "national_win_rate": float(vals[1]),
+            "national_2_rate": float(vals[2]),
+            "national_3_rate": float(vals[3]),
+            "local_win_rate": float(vals[4]),
+            "local_2_rate": float(vals[5]),
+            "local_3_rate": float(vals[6]),
+            "motor_no": int(vals[7]),
+            "motor_2_rate": float(vals[8]),
+            "motor_3_rate": float(vals[9]),
+            "boat_no": int(vals[10]),
+            "boat_2_rate": float(vals[11]),
+            "boat_3_rate": float(vals[12]),
+        }
+
     def fetch_all_venue_schedules(self, date_str):
         """全会場の1R〜12Rスケジュールを網羅的に取得する (最速・確実版)"""
         print(f"[{datetime.now(JST).strftime('%H:%M:%S')}] 🏟️  Retrieving daily schedules for all venues...")
@@ -425,15 +487,19 @@ class BoatRaceScraperV5:
             boat_info = {}
             for i in range(1, 7):
                 rank, win_rate = "B2", 0.0
-                for b in bodies:
-                    is_boat_row = b.select_one(f".is-ladder{i}") or str(i) in b.text[:5]
+                entry_features = {}
+                candidate_bodies = [bodies[i - 1]] if len(bodies) >= 6 else bodies
+                for b in candidate_bodies:
+                    is_boat_row = len(bodies) >= 6 or b.select_one(f".is-ladder{i}") or str(i) in b.text[:5]
                     if is_boat_row:
-                        r_m = re.search(r"([AB][12])", b.get_text())
+                        row_text = b.get_text(" ", strip=True)
+                        r_m = re.search(r"([AB][12])", row_text)
                         if r_m: rank = r_m.group(1)
-                        rates = re.findall(r"(\d\.\d{2})", b.get_text())
+                        rates = re.findall(r"(\d\.\d{2})", row_text)
                         if rates: win_rate = float(rates[0])
+                        entry_features = self._parse_entry_features(row_text)
                         break
-                boat_info[i] = {"rank": rank, "win_rate": win_rate}
+                boat_info[i] = {"rank": rank, "win_rate": win_rate, **entry_features}
 
             weather = soup_info.select_one(".weather1")
             wind_speed, wave = 0, 0
@@ -461,10 +527,31 @@ class BoatRaceScraperV5:
                     return None
                 ex_val = tds[4].text.strip()
                 data[f"ex_time_{i}"] = self._to_float(ex_val, 6.80)
+                data[f"weight_{i}"] = self._to_float(tds[3].get_text(" ", strip=True), 0.0) if len(tds) > 3 else 0.0
+                data[f"tilt_{i}"] = self._to_signed_float(tds[5].get_text(" ", strip=True), 0.0) if len(tds) > 5 else 0.0
+                parts_text = tds[7].get_text(" ", strip=True) if len(tds) > 7 else ""
+                data[f"parts_{i}"] = parts_text
+                data[f"parts_count_{i}"] = len(tds[7].select(".label4")) if len(tds) > 7 else 0
                 st_text = tds[2].select_one(".is-fs11").text.strip() if tds[2].select_one(".is-fs11") else ".15"
                 data[f"st_{i}"] = float("0"+re.search(r"(\.\d+)", st_text).group(1)) if re.search(r"(\.\d+)", st_text) else 0.15
                 data[f"rank_{i}"] = boat_info[i]["rank"]
                 data[f"win_rate_{i}"] = boat_info[i]["win_rate"]
+                for key in [
+                    "avg_st",
+                    "national_win_rate",
+                    "national_2_rate",
+                    "national_3_rate",
+                    "local_win_rate",
+                    "local_2_rate",
+                    "local_3_rate",
+                    "motor_no",
+                    "motor_2_rate",
+                    "motor_3_rate",
+                    "boat_no",
+                    "boat_2_rate",
+                    "boat_3_rate",
+                ]:
+                    data[f"{key}_{i}"] = boat_info[i].get(key, "")
 
             return data
         except Exception as e:
@@ -733,7 +820,11 @@ def predict_single(model, config, scraper, course, rno, date_str, race_url=None,
             "根拠": f"1号艇:{data['rank_1']} / 展示:{int(input_dict['ex_rank_1'])}位",
             "買い目": ticket_text,
             "点数": ticket_count,
-            "期待値MAX": max_ev
+            "期待値MAX": max_ev,
+            "特徴量": {
+                field: data.get(field, "")
+                for field in EXTRA_FEATURE_FIELDS
+            }
         }
         return res_dict, 1
         
