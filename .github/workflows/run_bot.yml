@@ -9,11 +9,8 @@ concurrency:
 
 on:
   schedule:
-    # 日本時間 8:30〜21:00まで15分おきに実行
-    # GitHub Actions の cron は UTC
-    - cron: '30,45 23 * * *'
-    - cron: '*/15 0-11 * * *'
-    - cron: '0 12 * * *'
+    # 自動実行確認用: 15分おきに実行
+    - cron: '*/15 * * * *'
   workflow_dispatch:
 
 jobs:
