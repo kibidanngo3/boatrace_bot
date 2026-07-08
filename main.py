@@ -129,13 +129,13 @@ def normalize_prediction_log_header():
 
 def settle_prediction_logs(scraper, now_jst):
     if not PREDICTION_LOG_FILE.exists():
-        return
+        return 0
 
     with open(PREDICTION_LOG_FILE, "r", newline="", encoding="utf-8-sig") as f:
         rows = list(csv.DictReader(f))
 
     if not rows:
-        return
+        return 0
 
     result_cache = {}
     settled_count = 0
@@ -186,6 +186,82 @@ def settle_prediction_logs(scraper, now_jst):
             writer.writeheader()
             writer.writerows(rows)
         print(f"  Settled prediction logs: {settled_count}")
+    return settled_count
+
+def build_performance_summary(now_jst):
+    if not PREDICTION_LOG_FILE.exists():
+        return None
+
+    with open(PREDICTION_LOG_FILE, "r", newline="", encoding="utf-8-sig") as f:
+        rows = list(csv.DictReader(f))
+
+    today = now_jst.strftime("%Y%m%d")
+    settled_rows = [
+        row for row in rows
+        if row.get("date") == today and row.get("settled_at")
+    ]
+    if not settled_rows:
+        return None
+
+    total_predictions = len(settled_rows)
+    hits = sum(1 for row in settled_rows if row.get("is_hit") == "1")
+    stake = sum(_safe_int(row.get("stake")) for row in settled_rows)
+    return_amount = sum(_safe_int(row.get("return_amount")) for row in settled_rows)
+    profit = return_amount - stake
+    roi = (return_amount / stake * 100) if stake else 0
+    hit_rate = (hits / total_predictions * 100) if total_predictions else 0
+
+    by_strategy = {}
+    for row in settled_rows:
+        strategy = row.get("strategy") or "UNKNOWN"
+        item = by_strategy.setdefault(strategy, {"count": 0, "hits": 0, "stake": 0, "return": 0})
+        item["count"] += 1
+        item["hits"] += 1 if row.get("is_hit") == "1" else 0
+        item["stake"] += _safe_int(row.get("stake"))
+        item["return"] += _safe_int(row.get("return_amount"))
+
+    strategy_lines = []
+    for strategy, item in sorted(by_strategy.items()):
+        strategy_roi = (item["return"] / item["stake"] * 100) if item["stake"] else 0
+        strategy_lines.append(
+            f"{strategy}: {item['hits']}/{item['count']} 回収率 {strategy_roi:.1f}%"
+        )
+
+    profit_text = f"+{profit:,}" if profit >= 0 else f"{profit:,}"
+    content = (
+        f"**本日の成績サマリー**\n"
+        f"予想数: `{total_predictions}` / 的中: `{hits}` / 的中率: `{hit_rate:.1f}%`\n"
+        f"投資: `{stake:,}円` / 払戻: `{return_amount:,}円` / 収支: `{profit_text}円`\n"
+        f"回収率: `{roi:.1f}%`"
+    )
+    if strategy_lines:
+        content += "\n\n**戦略別**\n" + "\n".join(strategy_lines)
+    return content
+
+def _safe_int(value):
+    try:
+        return int(float(value or 0))
+    except Exception:
+        return 0
+
+def send_discord_message(content, label):
+    if not DISCORD_WEBHOOK_URL:
+        print(f"    ⚠️ DISCORD_WEBHOOK_URL is not set ({label})")
+        return False
+    try:
+        response = requests.post(
+            DISCORD_WEBHOOK_URL,
+            json={"content": content},
+            timeout=15
+        )
+        if 200 <= response.status_code < 300:
+            print(f"    Discord message sent: {label}")
+            return True
+        print(f"    ❌ Discord Error ({label}): status={response.status_code}")
+        print(f"    Response: {response.text[:300]}")
+    except Exception as e:
+        print(f"    ❌ Discord Exception ({label}): {e}")
+    return False
 
 def _prediction_deadline_datetime(row):
     try:
@@ -681,7 +757,7 @@ def run_live_patrol():
     print("✅ Model loaded successfully.")
 
     scraper = BoatRaceScraperV5()
-    settle_prediction_logs(scraper, run_at)
+    settled_count = settle_prediction_logs(scraper, run_at)
 
     now_jst = datetime.now(JST)
     date_str = now_jst.strftime("%Y%m%d")
@@ -741,30 +817,18 @@ def run_live_patrol():
                 content += f"📈 最大期待値: `{res['期待値MAX']:.2f}`\n"
             content += f"📝 根拠: {res['根拠']}\n💰 推奨({res['点数']}点): `{res['買い目']}`\n━━━━━━━━━━━━━━━━━━━━"
 
-            if DISCORD_WEBHOOK_URL:
-                try:
-                    response = requests.post(
-                        DISCORD_WEBHOOK_URL,
-                        json={"content": content},
-                        timeout=15
-                    )
-
-                    if 200 <= response.status_code < 300:
-                        print(f"    ✅ Notification Sent for {race_id}")
-                    else:
-                        print(f"    ❌ Discord Error for {race_id}: status={response.status_code}")
-                        print(f"    Response: {response.text[:300]}")
-
-                except Exception as e:
-                    print(f"    ❌ Discord Exception for {race_id}: {e}")
-            else:
-                print("    ⚠️ DISCORD_WEBHOOK_URL is not set")
+            send_discord_message(content, race_id)
 
             save_prediction_log(race_id, race, res, run_at)
             
             # 通知済みリストに保存
             save_notified_race(race_id)
         time.sleep(1)
+
+    if settled_count:
+        summary = build_performance_summary(run_at)
+        if summary:
+            send_discord_message(summary, "daily performance summary")
 
     print(f"👮 Patrol Finished: Found {hit_count} hits.")
 
