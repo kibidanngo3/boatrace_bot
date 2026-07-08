@@ -43,11 +43,35 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Restore bot state
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            predictions.csv
+            notified_races.log
+          key: bot-state-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            bot-state-
+
       - name: Run Patrol
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
           python main.py
+
+      - name: Ensure state files
+        if: always()
+        run: |
+          touch predictions.csv notified_races.log
+
+      - name: Save bot state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            predictions.csv
+            notified_races.log
+          key: bot-state-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Upload prediction log
         if: always()

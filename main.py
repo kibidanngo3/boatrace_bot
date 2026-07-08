@@ -25,6 +25,37 @@ CONFIG_PATH = BASE_DIR / "model_config_v4.pkl"
 # 通知済みログファイル (スクリプトと同じ場所に作成)
 LOG_FILE = BASE_DIR / "notified_races.log"
 PREDICTION_LOG_FILE = BASE_DIR / "predictions.csv"
+STAKE_PER_TICKET = 100
+
+PREDICTION_LOG_FIELDS = [
+    "run_at",
+    "race_id",
+    "date",
+    "course",
+    "rno",
+    "deadline",
+    "strategy",
+    "in_win_prob",
+    "in_jump_prob",
+    "top1_boat",
+    "top1_prob",
+    "top2_boat",
+    "top2_prob",
+    "top3_boat",
+    "top3_prob",
+    "ticket_count",
+    "max_expected_value",
+    "tickets",
+    "reason",
+    "result_ticket",
+    "result_payout",
+    "is_hit",
+    "stake",
+    "return_amount",
+    "profit",
+    "roi",
+    "settled_at",
+]
 
 IN_JUMP_THRESHOLD = 0.55
 FOCUS_TOP_THRESHOLD = 0.35
@@ -51,27 +82,6 @@ def save_notified_race(race_id):
         f.write(race_id + "\n")
 
 def save_prediction_log(race_id, race, result, run_at):
-    fieldnames = [
-        "run_at",
-        "race_id",
-        "date",
-        "course",
-        "rno",
-        "deadline",
-        "strategy",
-        "in_win_prob",
-        "in_jump_prob",
-        "top1_boat",
-        "top1_prob",
-        "top2_boat",
-        "top2_prob",
-        "top3_boat",
-        "top3_prob",
-        "ticket_count",
-        "max_expected_value",
-        "tickets",
-        "reason",
-    ]
     row = {
         "run_at": run_at.isoformat(),
         "race_id": race_id,
@@ -94,12 +104,97 @@ def save_prediction_log(race_id, race, result, run_at):
         "reason": result["根拠"],
     }
 
+    normalize_prediction_log_header()
     file_exists = PREDICTION_LOG_FILE.exists()
     with open(PREDICTION_LOG_FILE, "a", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(f, fieldnames=PREDICTION_LOG_FIELDS)
         if not file_exists:
             writer.writeheader()
         writer.writerow(row)
+
+def normalize_prediction_log_header():
+    if not PREDICTION_LOG_FILE.exists():
+        return
+
+    with open(PREDICTION_LOG_FILE, "r", newline="", encoding="utf-8-sig") as f:
+        rows = list(csv.DictReader(f))
+
+    if not rows:
+        return
+
+    with open(PREDICTION_LOG_FILE, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=PREDICTION_LOG_FIELDS, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+
+def settle_prediction_logs(scraper, now_jst):
+    if not PREDICTION_LOG_FILE.exists():
+        return
+
+    with open(PREDICTION_LOG_FILE, "r", newline="", encoding="utf-8-sig") as f:
+        rows = list(csv.DictReader(f))
+
+    if not rows:
+        return
+
+    result_cache = {}
+    settled_count = 0
+    for row in rows:
+        if row.get("settled_at"):
+            continue
+
+        race_dt = _prediction_deadline_datetime(row)
+        if race_dt and now_jst < race_dt + timedelta(minutes=10):
+            continue
+
+        course = row.get("course", "")
+        try:
+            rno = int(row.get("rno", "0"))
+        except ValueError:
+            continue
+        date_str = row.get("date", "")
+        cache_key = (course, rno, date_str)
+
+        if cache_key not in result_cache:
+            result_cache[cache_key] = scraper.fetch_race_result(course, rno, date_str)
+        result = result_cache[cache_key]
+        if not result:
+            continue
+
+        tickets = set(re.findall(r"\b[1-6]-[1-6]-[1-6]\b", row.get("tickets", "")))
+        stake = len(tickets) * STAKE_PER_TICKET
+        is_hit = result["ticket"] in tickets
+        return_amount = result["payout"] if is_hit else 0
+        profit = return_amount - stake
+        roi = (return_amount / stake) if stake else 0
+
+        row.update({
+            "result_ticket": result["ticket"],
+            "result_payout": result["payout"],
+            "is_hit": "1" if is_hit else "0",
+            "stake": stake,
+            "return_amount": return_amount,
+            "profit": profit,
+            "roi": f"{roi:.6f}",
+            "settled_at": now_jst.isoformat(),
+        })
+        settled_count += 1
+
+    if settled_count:
+        with open(PREDICTION_LOG_FILE, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=PREDICTION_LOG_FIELDS, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(rows)
+        print(f"  Settled prediction logs: {settled_count}")
+
+def _prediction_deadline_datetime(row):
+    try:
+        return datetime.strptime(
+            f"{row.get('date')} {row.get('deadline')}",
+            "%Y%m%d %H:%M",
+        ).replace(tzinfo=JST)
+    except Exception:
+        return None
 
 # ==========================================
 # ==========================================
@@ -110,6 +205,7 @@ class BoatRaceScraperV5:
     LIST_URL = "https://www.boatrace.jp/owpc/pc/race/racelist"
     INDEX_URL = "https://www.boatrace.jp/owpc/pc/race/index"
     ODDS3T_URL = "https://www.boatrace.jp/owpc/pc/race/odds3t"
+    RESULT_URL = "https://www.boatrace.jp/owpc/pc/race/raceresult"
     
     COURSE_MAP = {
         "桐生": "01", "戸田": "02", "江戸川": "03", "平和島": "04", "多摩川": "05",
@@ -366,6 +462,45 @@ class BoatRaceScraperV5:
         m = re.search(r"[1-6]", cell.get_text(strip=True))
         return int(m.group(0)) if m else None
 
+    def fetch_race_result(self, course, rno, date_str):
+        """3連単の確定結果を {ticket, payout} で取得する。"""
+        jcd = self.COURSE_MAP.get(course, "01")
+        result_url = f"{self.RESULT_URL}?rno={rno}&jcd={jcd}&hd={date_str}"
+
+        try:
+            soup = self._get_soup(result_url, referer=f"{self.INDEX_URL}?hd={date_str}")
+            if not soup or "データがありません" in soup.text:
+                return None
+
+            for tbody in soup.select("tbody"):
+                first_row = tbody.select_one("tr")
+                if not first_row or "3連単" not in first_row.get_text(" ", strip=True):
+                    continue
+
+                nums = [
+                    n.get_text(strip=True)
+                    for n in first_row.select(".numberSet1_number")
+                    if re.fullmatch(r"[1-6]", n.get_text(strip=True))
+                ]
+                payout_cell = first_row.select_one(".is-payout1")
+                payout = self._payout_to_int(payout_cell.get_text(strip=True) if payout_cell else "")
+
+                if len(nums) >= 3 and payout:
+                    return {
+                        "ticket": "-".join(nums[:3]),
+                        "payout": payout,
+                    }
+            return None
+        except Exception as e:
+            print(f"  ❌ fetch_race_result error: {course} {rno}R - {e}")
+            traceback.print_exc()
+            return None
+
+    @staticmethod
+    def _payout_to_int(value):
+        digits = re.sub(r"\D", "", value or "")
+        return int(digits) if digits else 0
+
 def predict_probs(model, input_df):
     if hasattr(model, "predict_proba"):
         return model.predict_proba(input_df)[0]
@@ -546,6 +681,8 @@ def run_live_patrol():
     print("✅ Model loaded successfully.")
 
     scraper = BoatRaceScraperV5()
+    settle_prediction_logs(scraper, run_at)
+
     now_jst = datetime.now(JST)
     date_str = now_jst.strftime("%Y%m%d")
     
