@@ -1,4 +1,5 @@
 import os
+import csv
 import pandas as pd
 import numpy as np
 import pickle
@@ -23,6 +24,7 @@ CONFIG_PATH = BASE_DIR / "model_config_v4.pkl"
 
 # 通知済みログファイル (スクリプトと同じ場所に作成)
 LOG_FILE = BASE_DIR / "notified_races.log"
+PREDICTION_LOG_FILE = BASE_DIR / "predictions.csv"
 
 IN_JUMP_THRESHOLD = 0.55
 FOCUS_TOP_THRESHOLD = 0.35
@@ -47,6 +49,57 @@ def is_already_notified(race_id):
 def save_notified_race(race_id):
     with open(LOG_FILE, "a") as f:
         f.write(race_id + "\n")
+
+def save_prediction_log(race_id, race, result, run_at):
+    fieldnames = [
+        "run_at",
+        "race_id",
+        "date",
+        "course",
+        "rno",
+        "deadline",
+        "strategy",
+        "in_win_prob",
+        "in_jump_prob",
+        "top1_boat",
+        "top1_prob",
+        "top2_boat",
+        "top2_prob",
+        "top3_boat",
+        "top3_prob",
+        "ticket_count",
+        "max_expected_value",
+        "tickets",
+        "reason",
+    ]
+    row = {
+        "run_at": run_at.isoformat(),
+        "race_id": race_id,
+        "date": run_at.strftime("%Y%m%d"),
+        "course": result["場名"],
+        "rno": race["rno"],
+        "deadline": result["締切"],
+        "strategy": result["戦略"],
+        "in_win_prob": f"{result['1号艇勝率']:.6f}",
+        "in_jump_prob": f"{result['イン飛び率']:.6f}",
+        "top1_boat": result["1位"][0],
+        "top1_prob": f"{result['1位'][1]:.6f}",
+        "top2_boat": result["2位"][0],
+        "top2_prob": f"{result['2位'][1]:.6f}",
+        "top3_boat": result["3位"][0],
+        "top3_prob": f"{result['3位'][1]:.6f}",
+        "ticket_count": result["点数"],
+        "max_expected_value": "" if result["期待値MAX"] is None else f"{result['期待値MAX']:.6f}",
+        "tickets": result["買い目"],
+        "reason": result["根拠"],
+    }
+
+    file_exists = PREDICTION_LOG_FILE.exists()
+    with open(PREDICTION_LOG_FILE, "a", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(row)
 
 # ==========================================
 # ==========================================
@@ -481,7 +534,8 @@ def predict_single(model, config, scraper, course, rno, date_str, race_url=None,
 # 3. メイン実行 (パトロール)
 # ==========================================
 def run_live_patrol():
-    print(f"👮 Smart Patrol Start: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}")
+    run_at = datetime.now(JST)
+    print(f"👮 Smart Patrol Start: {run_at.strftime('%Y-%m-%d %H:%M:%S')}")
     
     if not MODEL_PATH.exists():
         print(f"❌ Error: Model file not found at {MODEL_PATH}")
@@ -568,6 +622,8 @@ def run_live_patrol():
                     print(f"    ❌ Discord Exception for {race_id}: {e}")
             else:
                 print("    ⚠️ DISCORD_WEBHOOK_URL is not set")
+
+            save_prediction_log(race_id, race, res, run_at)
             
             # 通知済みリストに保存
             save_notified_race(race_id)

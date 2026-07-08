@@ -6,3 +6,4 @@ __pycache__/
 venv/
 
 notified_races.log
+predictions.csv

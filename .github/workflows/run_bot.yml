@@ -48,3 +48,12 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
           python main.py
+
+      - name: Upload prediction log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prediction-log-${{ github.run_id }}
+          path: predictions.csv
+          if-no-files-found: ignore
+          retention-days: 30
