@@ -27,6 +27,12 @@ LOG_FILE = BASE_DIR / "notified_races.log"
 IN_JUMP_THRESHOLD = 0.55
 FOCUS_TOP_THRESHOLD = 0.35
 STANDARD_TOP_THRESHOLD = 0.25
+MIN_EXPECTED_VALUE = 1.00
+MAX_TICKET_COUNT = {
+    "FOCUS": 4,
+    "STANDARD": 8,
+    "WIDE": 12,
+}
 
 # ==========================================
 # 重複通知防止ロジック
@@ -50,6 +56,7 @@ class BoatRaceScraperV5:
     BASE_URL = "https://www.boatrace.jp/owpc/pc/race/beforeinfo"
     LIST_URL = "https://www.boatrace.jp/owpc/pc/race/racelist"
     INDEX_URL = "https://www.boatrace.jp/owpc/pc/race/index"
+    ODDS3T_URL = "https://www.boatrace.jp/owpc/pc/race/odds3t"
     
     COURSE_MAP = {
         "桐生": "01", "戸田": "02", "江戸川": "03", "平和島": "04", "多摩川": "05",
@@ -240,6 +247,72 @@ class BoatRaceScraperV5:
             traceback.print_exc()
             return None
 
+    def fetch_odds3t(self, course, rno, date_str):
+        """3連単オッズを {\"1-2-3\": 12.3} の形で取得する。"""
+        jcd = self.COURSE_MAP.get(course, "01")
+        odds_url = f"{self.ODDS3T_URL}?rno={rno}&jcd={jcd}&hd={date_str}"
+
+        try:
+            soup = self._get_soup(odds_url, referer=f"{self.INDEX_URL}?hd={date_str}")
+            if not soup or "データがありません" in soup.text:
+                print(f"  ⚠️ No odds data: {course} {rno}R")
+                return {}
+
+            odds_cell = soup.select_one("td.oddsPoint")
+            if not odds_cell:
+                print(f"  ⚠️ Odds table not found: {course} {rno}R")
+                return {}
+
+            table = odds_cell.find_parent("table")
+            header_cells = table.select("thead th")
+            first_boats = [
+                int(th.get_text(strip=True))
+                for th in header_cells
+                if re.fullmatch(r"[1-6]", th.get_text(strip=True))
+            ]
+            if len(first_boats) != 6:
+                first_boats = list(range(1, 7))
+
+            odds = {}
+            current_second = [None] * 6
+            for row in table.select("tbody tr"):
+                cells = row.select("td")
+                pos = 0
+                for group_idx, first in enumerate(first_boats):
+                    if pos >= len(cells):
+                        break
+
+                    if pos + 1 < len(cells) and "oddsPoint" in cells[pos + 1].get("class", []):
+                        second = current_second[group_idx]
+                        third = self._cell_boat_number(cells[pos])
+                        odd_text = cells[pos + 1].get_text(strip=True)
+                        pos += 2
+                    elif pos + 2 < len(cells):
+                        second = self._cell_boat_number(cells[pos])
+                        third = self._cell_boat_number(cells[pos + 1])
+                        odd_text = cells[pos + 2].get_text(strip=True)
+                        current_second[group_idx] = second
+                        pos += 3
+                    else:
+                        break
+
+                    odd = self._to_float(odd_text, 0.0)
+                    if first and second and third and odd > 0:
+                        odds[f"{first}-{second}-{third}"] = odd
+
+            if len(odds) < 100:
+                print(f"  ⚠️ Odds parsed incompletely: {course} {rno}R count={len(odds)}")
+            return odds
+        except Exception as e:
+            print(f"  ❌ fetch_odds3t error: {course} {rno}R - {e}")
+            traceback.print_exc()
+            return {}
+
+    @staticmethod
+    def _cell_boat_number(cell):
+        m = re.search(r"[1-6]", cell.get_text(strip=True))
+        return int(m.group(0)) if m else None
+
 def predict_probs(model, input_df):
     if hasattr(model, "predict_proba"):
         return model.predict_proba(input_df)[0]
@@ -267,6 +340,39 @@ def build_tickets(strategy, top1, top2, top3):
         ]
 
     return tickets
+
+def estimate_ticket_probability(ticket, probs):
+    first, second, third = [int(x) for x in ticket.split("-")]
+    p_first = probs[first - 1]
+
+    remaining_after_first = [i for i in range(1, 7) if i != first]
+    second_base = sum(probs[i - 1] for i in remaining_after_first)
+    p_second = probs[second - 1] / second_base if second_base > 0 else 0
+
+    remaining_after_second = [i for i in remaining_after_first if i != second]
+    third_base = sum(probs[i - 1] for i in remaining_after_second)
+    p_third = probs[third - 1] / third_base if third_base > 0 else 0
+
+    return p_first * p_second * p_third
+
+def add_expected_values(tickets, probs, odds_map, strategy):
+    enriched = []
+    for ticket in tickets:
+        odds = odds_map.get(ticket)
+        if not odds:
+            continue
+        probability = estimate_ticket_probability(ticket, probs)
+        expected_value = probability * odds
+        if expected_value >= MIN_EXPECTED_VALUE:
+            enriched.append({
+                "ticket": ticket,
+                "odds": odds,
+                "probability": probability,
+                "expected_value": expected_value,
+            })
+
+    enriched.sort(key=lambda x: x["expected_value"], reverse=True)
+    return enriched[:MAX_TICKET_COUNT.get(strategy, 8)]
 
 # 2. 予測ロジック
 # ==========================================
@@ -330,6 +436,24 @@ def predict_single(model, config, scraper, course, rno, date_str, race_url=None,
             return None, 0
 
         tickets = build_tickets(strategy, top1, top2, top3)
+        odds_map = scraper.fetch_odds3t(course, rno, date_str)
+        value_tickets = add_expected_values(tickets, probs, odds_map, strategy) if odds_map else []
+        if odds_map and not value_tickets:
+            print(f"  - {course} {rno}R: No tickets over EV {MIN_EXPECTED_VALUE:.2f}")
+            return None, 0
+
+        if value_tickets:
+            ticket_text = " / ".join(
+                f"{item['ticket']}({item['odds']:.1f}倍/EV{item['expected_value']:.2f})"
+                for item in value_tickets
+            )
+            ticket_count = len(value_tickets)
+            max_ev = value_tickets[0]["expected_value"]
+        else:
+            ticket_text = " / ".join(tickets)
+            ticket_count = len(tickets)
+            max_ev = None
+
         res_dict = {
             "場名": course,
             "レース": f"{rno}R",
@@ -343,8 +467,9 @@ def predict_single(model, config, scraper, course, rno, date_str, race_url=None,
             "4位以下": lower_ranking,
             "全体ランキング": all_ranking,
             "根拠": f"1号艇:{data['rank_1']} / 展示:{int(input_dict['ex_rank_1'])}位",
-            "買い目": " / ".join(tickets),
-            "点数": len(tickets)
+            "買い目": ticket_text,
+            "点数": ticket_count,
+            "期待値MAX": max_ev
         }
         return res_dict, 1
         
@@ -421,6 +546,8 @@ def run_live_patrol():
                 content += f"{idx}位 **{item[0]}号艇**: `{item[1]:.1%}`\n"
             
             content += "\n"
+            if res["期待値MAX"] is not None:
+                content += f"📈 最大期待値: `{res['期待値MAX']:.2f}`\n"
             content += f"📝 根拠: {res['根拠']}\n💰 推奨({res['点数']}点): `{res['買い目']}`\n━━━━━━━━━━━━━━━━━━━━"
 
             if DISCORD_WEBHOOK_URL:
