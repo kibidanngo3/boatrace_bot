@@ -1,5 +1,6 @@
 import os
 import csv
+import json
 import pandas as pd
 import numpy as np
 import pickle
@@ -25,7 +26,11 @@ CONFIG_PATH = BASE_DIR / "model_config_v4.pkl"
 # 通知済みログファイル (スクリプトと同じ場所に作成)
 LOG_FILE = BASE_DIR / "notified_races.log"
 PREDICTION_LOG_FILE = BASE_DIR / "predictions.csv"
+STATE_FILE = BASE_DIR / "bot_state.json"
 STAKE_PER_TICKET = 100
+NOTIFIED_LOG_KEEP_DAYS = 2
+SCHEDULE_FAILURE_ALERT_THRESHOLD = 3
+SCHEDULE_FAILURE_ALERT_INTERVAL = 3
 
 PREDICTION_LOG_FIELDS = [
     "run_at",
@@ -103,6 +108,35 @@ def is_already_notified(race_id):
 def save_notified_race(race_id):
     with open(LOG_FILE, "a") as f:
         f.write(race_id + "\n")
+
+def prune_notified_races(now_jst, keep_days=NOTIFIED_LOG_KEEP_DAYS):
+    """race_id (YYYYMMDD_場名_R番号) の日付部分を見て、古いレースIDを間引く"""
+    if not LOG_FILE.exists():
+        return
+    cutoff = (now_jst.date() - timedelta(days=keep_days)).strftime("%Y%m%d")
+    with open(LOG_FILE, "r") as f:
+        lines = [line.strip() for line in f if line.strip()]
+    kept = [line for line in lines if line[:8] >= cutoff]
+    if len(kept) != len(lines):
+        with open(LOG_FILE, "w") as f:
+            f.write("\n".join(kept) + ("\n" if kept else ""))
+        print(f"  Pruned notified_races.log: {len(lines)} -> {len(kept)}")
+
+# ==========================================
+# 実行間で持ち越す状態 (連続失敗カウント・サマリー送信済みフラグ)
+# ==========================================
+def load_state():
+    if not STATE_FILE.exists():
+        return {}
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def save_state(state):
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False)
 
 def save_prediction_log(race_id, race, result, run_at):
     row = {
@@ -218,18 +252,13 @@ def settle_prediction_logs(scraper, now_jst):
         print(f"  Settled prediction logs: {settled_count}")
     return settled_count
 
-def build_performance_summary(now_jst):
+def _load_prediction_rows():
     if not PREDICTION_LOG_FILE.exists():
-        return None
-
+        return []
     with open(PREDICTION_LOG_FILE, "r", newline="", encoding="utf-8-sig") as f:
-        rows = list(csv.DictReader(f))
+        return list(csv.DictReader(f))
 
-    today = now_jst.strftime("%Y%m%d")
-    settled_rows = [
-        row for row in rows
-        if row.get("date") == today and row.get("settled_at")
-    ]
+def _summarize_rows(settled_rows, title):
     if not settled_rows:
         return None
 
@@ -259,7 +288,7 @@ def build_performance_summary(now_jst):
 
     profit_text = f"+{profit:,}" if profit >= 0 else f"{profit:,}"
     content = (
-        f"**本日の成績サマリー**\n"
+        f"**{title}**\n"
         f"予想数: `{total_predictions}` / 的中: `{hits}` / 的中率: `{hit_rate:.1f}%`\n"
         f"投資: `{stake:,}円` / 払戻: `{return_amount:,}円` / 収支: `{profit_text}円`\n"
         f"回収率: `{roi:.1f}%`"
@@ -267,6 +296,44 @@ def build_performance_summary(now_jst):
     if strategy_lines:
         content += "\n\n**戦略別**\n" + "\n".join(strategy_lines)
     return content
+
+def build_performance_summary(now_jst):
+    rows = _load_prediction_rows()
+    if not rows:
+        return None
+    today = now_jst.strftime("%Y%m%d")
+    settled_rows = [row for row in rows if row.get("date") == today and row.get("settled_at")]
+    return _summarize_rows(settled_rows, "本日の成績サマリー")
+
+def build_weekly_summary(now_jst):
+    rows = _load_prediction_rows()
+    if not rows:
+        return None
+    today = now_jst.date()
+    week_start = today - timedelta(days=today.weekday())
+    week_start_str = week_start.strftime("%Y%m%d")
+    today_str = today.strftime("%Y%m%d")
+    settled_rows = [
+        row for row in rows
+        if row.get("settled_at") and week_start_str <= row.get("date", "") <= today_str
+    ]
+    title = f"今週の成績サマリー ({week_start.strftime('%m/%d')}〜{today.strftime('%m/%d')})"
+    return _summarize_rows(settled_rows, title)
+
+def build_monthly_summary(now_jst):
+    rows = _load_prediction_rows()
+    if not rows:
+        return None
+    month_prefix = now_jst.strftime("%Y%m")
+    settled_rows = [
+        row for row in rows
+        if row.get("settled_at") and row.get("date", "").startswith(month_prefix)
+    ]
+    title = f"今月の成績サマリー ({now_jst.strftime('%Y年%m月')})"
+    return _summarize_rows(settled_rows, title)
+
+def _is_last_day_of_month(d):
+    return (d + timedelta(days=1)).month != d.month
 
 def _safe_int(value):
     try:
@@ -847,15 +914,35 @@ def run_live_patrol():
     with open(CONFIG_PATH, "rb") as f: config = pickle.load(f)
     print("✅ Model loaded successfully.")
 
+    prune_notified_races(run_at)
+    state = load_state()
+
     scraper = BoatRaceScraperV5()
     settled_count = settle_prediction_logs(scraper, run_at)
 
     now_jst = datetime.now(JST)
     date_str = now_jst.strftime("%Y%m%d")
-    
+
     # 1. 1日の全スケジュールを取得 (初回、または1時間ごとに更新すると効率的)
     all_races = scraper.fetch_all_venue_schedules(date_str)
-    
+
+    if not all_races:
+        state["consecutive_schedule_failures"] = state.get("consecutive_schedule_failures", 0) + 1
+        failures = state["consecutive_schedule_failures"]
+        last_alert = state.get("last_schedule_alert_count", 0)
+        print(f"  ⚠️ Schedule fetch returned no venues ({failures} consecutive failures)")
+        if failures >= SCHEDULE_FAILURE_ALERT_THRESHOLD and failures - last_alert >= SCHEDULE_FAILURE_ALERT_INTERVAL:
+            send_discord_message(
+                f"⚠️ **スケジュール取得が{failures}回連続で失敗しています**\n"
+                f"boatrace.jpの構造変更やアクセス制限の可能性があります。",
+                "schedule fetch failure",
+            )
+            state["last_schedule_alert_count"] = failures
+    else:
+        state["consecutive_schedule_failures"] = 0
+        state["last_schedule_alert_count"] = 0
+    save_state(state)
+
     # 2. 現在のターゲット (5分〜35分前) を抽出
     targets = []
     print(f"[{datetime.now(JST).strftime('%H:%M:%S')}] 🔍 Filtering targets from schedule...")
@@ -920,6 +1007,22 @@ def run_live_patrol():
         summary = build_performance_summary(run_at)
         if summary:
             send_discord_message(summary, "daily performance summary")
+
+    current_week = run_at.strftime("%G-W%V")
+    if run_at.weekday() == 6 and run_at.hour == 23 and state.get("last_weekly_summary") != current_week:
+        weekly = build_weekly_summary(run_at)
+        if weekly:
+            send_discord_message(weekly, "weekly performance summary")
+        state["last_weekly_summary"] = current_week
+        save_state(state)
+
+    current_month = run_at.strftime("%Y-%m")
+    if _is_last_day_of_month(run_at.date()) and run_at.hour == 23 and state.get("last_monthly_summary") != current_month:
+        monthly = build_monthly_summary(run_at)
+        if monthly:
+            send_discord_message(monthly, "monthly performance summary")
+        state["last_monthly_summary"] = current_month
+        save_state(state)
 
     print(f"👮 Patrol Finished: Found {hit_count} hits.")
 

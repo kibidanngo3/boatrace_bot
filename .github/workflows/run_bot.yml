@@ -46,6 +46,7 @@ jobs:
           path: |
             predictions.csv
             notified_races.log
+            bot_state.json
           key: bot-state-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             bot-state-
@@ -59,7 +60,7 @@ jobs:
       - name: Ensure state files
         if: always()
         run: |
-          touch predictions.csv notified_races.log
+          touch predictions.csv notified_races.log bot_state.json
 
       - name: Save bot state
         if: always()
@@ -68,6 +69,7 @@ jobs:
           path: |
             predictions.csv
             notified_races.log
+            bot_state.json
           key: bot-state-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Upload prediction log
