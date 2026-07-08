@@ -9,8 +9,8 @@ concurrency:
 
 on:
   schedule:
-    # 自動実行確認用: 混雑しやすい00分を避けて5分おきに実行
-    - cron: '2-59/5 * * * *'
+    # 混雑しやすい00分を避けて15分おきに実行
+    - cron: '3-59/15 * * * *'
   workflow_dispatch:
 
 jobs:
