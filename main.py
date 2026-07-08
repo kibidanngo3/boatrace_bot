@@ -27,12 +27,16 @@ CONFIG_PATH = BASE_DIR / "model_config_v4.pkl"
 LOG_FILE = BASE_DIR / "notified_races.log"
 PREDICTION_LOG_FILE = BASE_DIR / "predictions.csv"
 STATE_FILE = BASE_DIR / "bot_state.json"
-STAKE_PER_TICKET = 100
+STAKE_PER_TICKET = 100  # 舟券の購入単位 (100円単位) / ケリー計算後の丸め単位
 NOTIFIED_LOG_KEEP_DAYS = 2
 OPERATING_HOUR_START = 7   # 07:00 JST (モーニング競走を考慮)
 OPERATING_HOUR_END = 22    # 22:00 JST (ナイター開催を考慮)
 SCHEDULE_FAILURE_ALERT_THRESHOLD = 3
 SCHEDULE_FAILURE_ALERT_INTERVAL = 3
+
+STARTING_BANKROLL = 10000  # 元手資金 (円)
+KELLY_FRACTION = 0.5       # 半分ケリー
+MAX_RACE_STAKE_RATIO = 0.3  # 1レースあたりの賭け金上限 (バンクロールに対する比率)
 
 PREDICTION_LOG_FIELDS = [
     "run_at",
@@ -53,6 +57,8 @@ PREDICTION_LOG_FIELDS = [
     "ticket_count",
     "max_expected_value",
     "tickets",
+    "ticket_stakes",
+    "bankroll_at_bet",
     "reason",
     "result_ticket",
     "result_payout",
@@ -160,6 +166,8 @@ def save_prediction_log(race_id, race, result, run_at):
         "ticket_count": result["点数"],
         "max_expected_value": "" if result["期待値MAX"] is None else f"{result['期待値MAX']:.6f}",
         "tickets": result["買い目"],
+        "ticket_stakes": json.dumps(result.get("買い目内訳", {}), ensure_ascii=False),
+        "bankroll_at_bet": result.get("バンクロール", ""),
         "reason": result["根拠"],
     }
     feature_data = result.get("特徴量", {})
@@ -193,7 +201,7 @@ def normalize_prediction_log_header():
         writer.writeheader()
         writer.writerows(rows)
 
-def settle_prediction_logs(scraper, now_jst):
+def settle_prediction_logs(scraper, now_jst, state):
     if not PREDICTION_LOG_FILE.exists():
         return 0
 
@@ -227,12 +235,19 @@ def settle_prediction_logs(scraper, now_jst):
         if not result:
             continue
 
-        tickets = set(re.findall(r"\b[1-6]-[1-6]-[1-6]\b", row.get("tickets", "")))
-        stake = len(tickets) * STAKE_PER_TICKET
-        is_hit = result["ticket"] in tickets
-        return_amount = result["payout"] if is_hit else 0
+        try:
+            ticket_stakes = json.loads(row.get("ticket_stakes") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            ticket_stakes = {}
+
+        stake = sum(ticket_stakes.values())
+        is_hit = result["ticket"] in ticket_stakes
+        matched_stake = ticket_stakes.get(result["ticket"], 0)
+        return_amount = int(matched_stake / STAKE_PER_TICKET * result["payout"]) if is_hit else 0
         profit = return_amount - stake
         roi = (return_amount / stake) if stake else 0
+
+        state["current_bankroll"] = state.get("current_bankroll", STARTING_BANKROLL) + profit
 
         row.update({
             "result_ticket": result["ticket"],
@@ -794,9 +809,39 @@ def add_expected_values(tickets, probs, odds_map, strategy):
     enriched.sort(key=lambda x: x["expected_value"], reverse=True)
     return enriched[:MAX_TICKET_COUNT.get(strategy, 8)]
 
+def add_kelly_stakes(value_tickets, bankroll):
+    """複数の排反な買い目に同時に賭ける場合のケリー基準 (Thorpの一般化式)。
+    odds はグロス配当 (100円が odds*100円になる) なので、ネットオッズ b = odds - 1 を使う。
+    f_i = p_i - (1 - ΣP) / b_i
+    """
+    if not value_tickets or bankroll <= 0:
+        for item in value_tickets:
+            item["stake"] = 0
+        return value_tickets
+
+    total_prob = sum(item["probability"] for item in value_tickets)
+    for item in value_tickets:
+        net_odds = item["odds"] - 1
+        if net_odds <= 0:
+            item["stake"] = 0
+            continue
+        edge = item["probability"] - (1 - total_prob) / net_odds
+        fraction = max(edge, 0.0) * KELLY_FRACTION
+        raw_stake = bankroll * fraction
+        item["stake"] = int(raw_stake // STAKE_PER_TICKET) * STAKE_PER_TICKET
+
+    total_stake = sum(item["stake"] for item in value_tickets)
+    max_total = bankroll * MAX_RACE_STAKE_RATIO
+    if total_stake > max_total > 0:
+        scale = max_total / total_stake
+        for item in value_tickets:
+            item["stake"] = int((item["stake"] * scale) // STAKE_PER_TICKET) * STAKE_PER_TICKET
+
+    return value_tickets
+
 # 2. 予測ロジック
 # ==========================================
-def predict_single(model, config, scraper, course, rno, date_str, race_url=None, deadline=None):
+def predict_single(model, config, scraper, course, rno, date_str, bankroll, race_url=None, deadline=None):
     try:
         data = scraper.fetch_race_data(course, rno, date_str, race_url=race_url, deadline=deadline)
         if not data: 
@@ -862,13 +907,21 @@ def predict_single(model, config, scraper, course, rno, date_str, race_url=None,
             print(f"  - {course} {rno}R: No tickets over EV {MIN_EXPECTED_VALUE:.2f}")
             return None, 0
 
+        ticket_stakes = {}
         if value_tickets:
+            value_tickets = add_kelly_stakes(value_tickets, bankroll)
+            staked_tickets = [item for item in value_tickets if item["stake"] > 0]
+            if not staked_tickets:
+                print(f"  - {course} {rno}R: Kelly stake is 0 for all tickets (skip)")
+                return None, 0
+
             ticket_text = " / ".join(
-                f"{item['ticket']}({item['odds']:.1f}倍/EV{item['expected_value']:.2f})"
-                for item in value_tickets
+                f"{item['ticket']}({item['odds']:.1f}倍/EV{item['expected_value']:.2f}/¥{item['stake']:,})"
+                for item in staked_tickets
             )
-            ticket_count = len(value_tickets)
-            max_ev = value_tickets[0]["expected_value"]
+            ticket_count = len(staked_tickets)
+            max_ev = max(item["expected_value"] for item in staked_tickets)
+            ticket_stakes = {item["ticket"]: item["stake"] for item in staked_tickets}
         else:
             ticket_text = " / ".join(tickets)
             ticket_count = len(tickets)
@@ -888,6 +941,8 @@ def predict_single(model, config, scraper, course, rno, date_str, race_url=None,
             "全体ランキング": all_ranking,
             "根拠": f"1号艇:{data['rank_1']} / 展示:{int(input_dict['ex_rank_1'])}位",
             "買い目": ticket_text,
+            "買い目内訳": ticket_stakes,
+            "バンクロール": bankroll,
             "点数": ticket_count,
             "期待値MAX": max_ev,
             "特徴量": {
@@ -905,6 +960,11 @@ def predict_single(model, config, scraper, course, rno, date_str, race_url=None,
 # 3. メイン実行 (パトロール)
 # ==========================================
 def scan_and_notify(model, config, scraper, now_jst, date_str, run_at, state):
+    bankroll = state.get("current_bankroll", STARTING_BANKROLL)
+    if bankroll < STAKE_PER_TICKET:
+        print(f"  💸 Bankroll too low to bet ({bankroll}円). Skipping.")
+        return 0
+
     # 1. 1日の全スケジュールを取得 (初回、または1時間ごとに更新すると効率的)
     all_races = scraper.fetch_all_venue_schedules(date_str)
 
@@ -955,7 +1015,7 @@ def scan_and_notify(model, config, scraper, now_jst, date_str, run_at, state):
         race_id = race['id']
 
         print(f"  - {course} {rno}R: Analyzing... (Deadline: {race['time']})")
-        res, status = predict_single(model, config, scraper, course, rno, date_str, race_url=race['url'], deadline=race['time'])
+        res, status = predict_single(model, config, scraper, course, rno, date_str, bankroll, race_url=race['url'], deadline=race['time'])
 
         if status == 1:
             hit_count += 1
@@ -975,7 +1035,11 @@ def scan_and_notify(model, config, scraper, now_jst, date_str, run_at, state):
             content += "\n"
             if res["期待値MAX"] is not None:
                 content += f"📈 最大期待値: `{res['期待値MAX']:.2f}`\n"
-            content += f"📝 根拠: {res['根拠']}\n💰 推奨({res['点数']}点): `{res['買い目']}`\n━━━━━━━━━━━━━━━━━━━━"
+            content += f"📝 根拠: {res['根拠']}\n💰 推奨({res['点数']}点): `{res['買い目']}`\n"
+            if res.get("買い目内訳"):
+                total_stake = sum(res["買い目内訳"].values())
+                content += f"💴 合計賭け金: `{total_stake:,}円` (バンクロール `{res['バンクロール']:,}円` 基準)\n"
+            content += "━━━━━━━━━━━━━━━━━━━━"
 
             send_discord_message(content, race_id)
 
@@ -994,8 +1058,12 @@ def run_live_patrol():
     prune_notified_races(run_at)
     state = load_state()
 
+    if "current_bankroll" not in state:
+        state["current_bankroll"] = STARTING_BANKROLL
+
     scraper = BoatRaceScraperV5()
-    settled_count = settle_prediction_logs(scraper, run_at)
+    settled_count = settle_prediction_logs(scraper, run_at, state)
+    save_state(state)
 
     now_jst = datetime.now(JST)
     date_str = now_jst.strftime("%Y%m%d")

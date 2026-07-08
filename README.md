@@ -33,6 +33,17 @@ cron-job.orgに登録しているGitHubのFine-grained PATは **2026年10月6日
 5. Headers の `Authorization` の値を `Bearer <新しいトークン>` に書き換えて保存
 6. ジョブの「Test run」を実行し、GitHub Actions側（Actionsタブ）で新しい実行が`workflow_dispatch`イベントとして開始されることを確認する
 
+## 賭け金の計算 (ケリー基準)
+
+各買い目の賭け金は、複数の排反な買い目に同時に賭ける場合のケリー基準 (Thorpの一般化式) で計算している。
+
+- `main.py`の定数（変更する場合はここを編集する）
+  - `STARTING_BANKROLL = 10000`: 初期バンクロール（円）
+  - `KELLY_FRACTION = 0.5`: 半分ケリー（フルケリーは変動が大きいため）
+  - `MAX_RACE_STAKE_RATIO = 0.3`: 1レースあたりの賭け金上限（バンクロールの30%、モデル誤差による過大ベットの安全弁）
+- 現在のバンクロールはレース結果が決着するたびに損益を反映して`bot_state.json`の`current_bankroll`に保存される（GitHub Actionsのキャッシュに永続化）
+- バンクロールを手動でリセットしたい場合は、cron-job.orgでのTest run後にActionsのキャッシュを削除するか、`bot_state.json`の`current_bankroll`を直接書き換える
+
 ## バックテスト
 
 蓄積した`predictions.csv`を使って成績・EV閾値ごとの回収率を確認できる。

@@ -13,7 +13,7 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent.parent
 PREDICTION_LOG_FILE = BASE_DIR / "predictions.csv"
 
-TICKET_RE = re.compile(r"([1-6]-[1-6]-[1-6])\((\d+(?:\.\d+)?)倍/EV(\d+(?:\.\d+)?)\)")
+TICKET_RE = re.compile(r"([1-6]-[1-6]-[1-6])\((\d+(?:\.\d+)?)倍/EV(\d+(?:\.\d+)?)(?:/¥[\d,]+)?\)")
 
 
 def load_rows():
