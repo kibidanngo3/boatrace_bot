@@ -924,4 +924,14 @@ def run_live_patrol():
     print(f"👮 Patrol Finished: Found {hit_count} hits.")
 
 if __name__ == "__main__":
-    run_live_patrol()
+    try:
+        run_live_patrol()
+    except Exception as e:
+        error_text = traceback.format_exc()
+        print(f"❌ Fatal error: {e}")
+        print(error_text)
+        send_discord_message(
+            f"🚨 **Boatrace Patrol クラッシュ**\n```\n{error_text[-1500:]}\n```",
+            "fatal error",
+        )
+        raise
