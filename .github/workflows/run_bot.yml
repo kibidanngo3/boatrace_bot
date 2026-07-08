@@ -9,8 +9,8 @@ concurrency:
 
 on:
   schedule:
-    # 自動実行確認用: 15分おきに実行
-    - cron: '*/15 * * * *'
+    # 自動実行確認用: 1分おきに実行
+    - cron: '* * * * *'
   workflow_dispatch:
 
 jobs:
