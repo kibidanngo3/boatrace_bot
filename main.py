@@ -29,6 +29,8 @@ PREDICTION_LOG_FILE = BASE_DIR / "predictions.csv"
 STATE_FILE = BASE_DIR / "bot_state.json"
 STAKE_PER_TICKET = 100
 NOTIFIED_LOG_KEEP_DAYS = 2
+OPERATING_HOUR_START = 7   # 07:00 JST (モーニング競走を考慮)
+OPERATING_HOUR_END = 22    # 22:00 JST (ナイター開催を考慮)
 SCHEDULE_FAILURE_ALERT_THRESHOLD = 3
 SCHEDULE_FAILURE_ALERT_INTERVAL = 3
 
@@ -902,27 +904,7 @@ def predict_single(model, config, scraper, course, rno, date_str, race_url=None,
 # ==========================================
 # 3. メイン実行 (パトロール)
 # ==========================================
-def run_live_patrol():
-    run_at = datetime.now(JST)
-    print(f"👮 Smart Patrol Start: {run_at.strftime('%Y-%m-%d %H:%M:%S')}")
-    
-    if not MODEL_PATH.exists():
-        print(f"❌ Error: Model file not found at {MODEL_PATH}")
-        return
-
-    with open(MODEL_PATH, "rb") as f: model = pickle.load(f)
-    with open(CONFIG_PATH, "rb") as f: config = pickle.load(f)
-    print("✅ Model loaded successfully.")
-
-    prune_notified_races(run_at)
-    state = load_state()
-
-    scraper = BoatRaceScraperV5()
-    settled_count = settle_prediction_logs(scraper, run_at)
-
-    now_jst = datetime.now(JST)
-    date_str = now_jst.strftime("%Y%m%d")
-
+def scan_and_notify(model, config, scraper, now_jst, date_str, run_at, state):
     # 1. 1日の全スケジュールを取得 (初回、または1時間ごとに更新すると効率的)
     all_races = scraper.fetch_all_venue_schedules(date_str)
 
@@ -950,7 +932,7 @@ def run_live_patrol():
         try:
             race_dt = datetime.strptime(f"{date_str} {time_str}", "%Y%m%d %H:%M").replace(tzinfo=JST)
             diff = (race_dt - now_jst).total_seconds() / 60
-            
+
             # デバッグ表示: 窓に近いものを出す
             if 0 <= diff <= 45:
                 print(f"  - {course} {rno}R: {time_str} (in {diff:.1f}m)")
@@ -966,30 +948,30 @@ def run_live_patrol():
     hit_count = 0
     if not targets:
         print("  (No new target races in the 5-35 min window)")
-        
+
     for race in targets:
         course = race['course']
         rno = race['rno']
         race_id = race['id']
-        
+
         print(f"  - {course} {rno}R: Analyzing... (Deadline: {race['time']})")
         res, status = predict_single(model, config, scraper, course, rno, date_str, race_url=race['url'], deadline=race['time'])
-        
+
         if status == 1:
             hit_count += 1
             # Discord通知処理 (フォーマットを調整)
             content = f"🎯 **投資チャンス到来！**\n📍 **{res['場名']} {res['レース']}** (締切 {res['締切']})\n"
             content += f"━━━━━━━━━━━━━━━━━━━━\n🔥 戦略: **{res['戦略']}**\n😱 イン飛び率: `{res['イン飛び率']:.1%}`\n\n"
             content += f"🏠 **1号艇勝率**: `{res['1号艇勝率']:.1%}`\n"
-            
+
             content += f"📊 **AI勝率ランキング (1抜き)**\n"
             content += f"🥇 **{res['1位'][0]}号艇**: `{res['1位'][1]:.1%}`\n"
             content += f"🥈 **{res['2位'][0]}号艇**: `{res['2位'][1]:.1%}`\n"
             content += f"🥉 **{res['3位'][0]}号艇**: `{res['3位'][1]:.1%}`\n"
-            
+
             for idx, item in enumerate(res["4位以下"], start=4):
                 content += f"{idx}位 **{item[0]}号艇**: `{item[1]:.1%}`\n"
-            
+
             content += "\n"
             if res["期待値MAX"] is not None:
                 content += f"📈 最大期待値: `{res['期待値MAX']:.2f}`\n"
@@ -998,10 +980,37 @@ def run_live_patrol():
             send_discord_message(content, race_id)
 
             save_prediction_log(race_id, race, res, run_at)
-            
+
             # 通知済みリストに保存
             save_notified_race(race_id)
         time.sleep(1)
+
+    return hit_count
+
+def run_live_patrol():
+    run_at = datetime.now(JST)
+    print(f"👮 Smart Patrol Start: {run_at.strftime('%Y-%m-%d %H:%M:%S')}")
+
+    prune_notified_races(run_at)
+    state = load_state()
+
+    scraper = BoatRaceScraperV5()
+    settled_count = settle_prediction_logs(scraper, run_at)
+
+    now_jst = datetime.now(JST)
+    date_str = now_jst.strftime("%Y%m%d")
+
+    hit_count = 0
+    if OPERATING_HOUR_START <= now_jst.hour < OPERATING_HOUR_END:
+        if not MODEL_PATH.exists():
+            print(f"❌ Error: Model file not found at {MODEL_PATH}")
+        else:
+            with open(MODEL_PATH, "rb") as f: model = pickle.load(f)
+            with open(CONFIG_PATH, "rb") as f: config = pickle.load(f)
+            print("✅ Model loaded successfully.")
+            hit_count = scan_and_notify(model, config, scraper, now_jst, date_str, run_at, state)
+    else:
+        print(f"  💤 Outside operating hours ({OPERATING_HOUR_START}:00-{OPERATING_HOUR_END}:00 JST). Skipping schedule scan.")
 
     if settled_count:
         summary = build_performance_summary(run_at)
