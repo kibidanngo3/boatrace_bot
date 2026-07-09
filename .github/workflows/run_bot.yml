@@ -73,7 +73,7 @@ jobs:
             [ -f "$f" ] && cp "$f" state-worktree/
           done
           cd state-worktree
-          git add -A
+          git add -f predictions.csv notified_races.log bot_state.json
           if ! git diff --cached --quiet; then
             git commit -m "Update bot state"
             git push origin HEAD:bot-state
