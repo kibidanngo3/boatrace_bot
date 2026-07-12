@@ -773,27 +773,21 @@ def predict_probs(model, input_df):
     return model.predict(input_df)[0]
 
 def build_tickets(strategy, top1, top2, top3):
-    first = top1[0]
-    seconds = [top2[0], top3[0]]
-    tickets = []
-    for second in seconds:
-        thirds = [n for n in range(1, 7) if n not in (first, second)]
-        tickets.extend(f"{first}-{second}-{third}" for third in thirds)
+    """買い目候補を「全120通りの3連単から1号艇1着(イン逃げ)を除いたもの」で返す。
 
-    if strategy == "FOCUS":
-        tickets = tickets[:4]
-    elif strategy == "STANDARD":
-        tickets = tickets[:8]
-    else:
-        tickets = [
-            f"{a}-{b}-{c}"
-            for a in range(2, 7)
-            for b in range(2, 7)
-            for c in range(1, 7)
-            if len({a, b, c}) == 3
-        ]
-
-    return tickets
+    以前は top1/top2/top3 から機械的に4〜8点だけを候補にしていたが、上位予測に
+    入らない高EVな買い目を取りこぼしていた。バックテスト(model_evaluation_log.md参照)で
+    全120通り・1号艇1着除外をEV順に選ぶ方が回収率が高いと確認されたため変更。
+    最終的な購入点数は add_expected_values 側で EV順ソート後 MAX_TICKET_COUNT[strategy] に絞られる。
+    top1/top2/top3 は互換性のため引数に残す(未使用)。
+    """
+    return [
+        f"{a}-{b}-{c}"
+        for a in range(2, 7)   # 1号艇は1着にしない(イン飛び戦略の趣旨)
+        for b in range(1, 7)
+        for c in range(1, 7)
+        if len({a, b, c}) == 3
+    ]
 
 ORDER_MODEL_2ND_PATH = BASE_DIR / "order_model_2nd_v1.pkl"
 ORDER_MODEL_3RD_PATH = BASE_DIR / "order_model_3rd_v1.pkl"
@@ -963,33 +957,33 @@ def predict_single(model, config, scraper, course, rno, date_str, bankroll, kell
             print(f"  - {course} {rno}R: No tickets over EV {MIN_EXPECTED_VALUE:.2f}")
             return None, 0
 
-        ticket_details = {}
-        if value_tickets:
-            value_tickets = add_kelly_stakes(value_tickets, bankroll, kelly_fraction)
-            staked_tickets = [item for item in value_tickets if item["stake"] > 0]
-            if not staked_tickets:
-                print(f"  - {course} {rno}R: Kelly stake is 0 for all tickets (skip)")
-                return None, 0
+        if not value_tickets:
+            # オッズ取得失敗など。全120通り候補をそのまま通知するとスパムになるうえ
+            # EV/賭け金を計算できないため、ベットせずスキップする。
+            print(f"  - {course} {rno}R: No odds / no value tickets (skip)")
+            return None, 0
 
-            ticket_text = " / ".join(
-                f"{item['ticket']}({item['odds']:.1f}倍/EV{item['expected_value']:.2f}/¥{item['stake']:,})"
-                for item in staked_tickets
-            )
-            ticket_count = len(staked_tickets)
-            max_ev = max(item["expected_value"] for item in staked_tickets)
-            ticket_details = {
-                item["ticket"]: {
-                    "odds": item["odds"],
-                    "probability": item["probability"],
-                    "expected_value": item["expected_value"],
-                    "stake": item["stake"],
-                }
-                for item in staked_tickets
+        value_tickets = add_kelly_stakes(value_tickets, bankroll, kelly_fraction)
+        staked_tickets = [item for item in value_tickets if item["stake"] > 0]
+        if not staked_tickets:
+            print(f"  - {course} {rno}R: Kelly stake is 0 for all tickets (skip)")
+            return None, 0
+
+        ticket_text = " / ".join(
+            f"{item['ticket']}({item['odds']:.1f}倍/EV{item['expected_value']:.2f}/¥{item['stake']:,})"
+            for item in staked_tickets
+        )
+        ticket_count = len(staked_tickets)
+        max_ev = max(item["expected_value"] for item in staked_tickets)
+        ticket_details = {
+            item["ticket"]: {
+                "odds": item["odds"],
+                "probability": item["probability"],
+                "expected_value": item["expected_value"],
+                "stake": item["stake"],
             }
-        else:
-            ticket_text = " / ".join(tickets)
-            ticket_count = len(tickets)
-            max_ev = None
+            for item in staked_tickets
+        }
 
         res_dict = {
             "場名": course,
