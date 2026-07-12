@@ -20,10 +20,12 @@ import lhafile
 import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from scripts.build_training_data import FIELDNAMES, RAW_FIELDS  # noqa: E402
+from scripts.build_training_data import FIELDNAMES as _BASE_FIELDNAMES, RAW_FIELDS  # noqa: E402
 from main import BoatRaceScraperV5  # noqa: E402
 
 KNOWN_VENUES = sorted(BoatRaceScraperV5.COURSE_MAP.keys(), key=len, reverse=True)
+_label_idx = _BASE_FIELDNAMES.index("label")
+FIELDNAMES = _BASE_FIELDNAMES[: _label_idx + 1] + ["label_2nd", "label_3rd"] + _BASE_FIELDNAMES[_label_idx + 1 :]
 
 B_BASE = "https://www1.mbrace.or.jp/od2/B"
 K_BASE = "https://www1.mbrace.or.jp/od2/K"
@@ -135,7 +137,10 @@ def parse_k_file(text):
     for venue, races in payouts.items():
         for rno, ticket in races.items():
             if venue in result and rno in result[venue]:
-                result[venue][rno]["label"] = int(ticket.split("-")[0])
+                first, second, third = [int(x) for x in ticket.split("-")]
+                result[venue][rno]["label"] = first
+                result[venue][rno]["label_2nd"] = second
+                result[venue][rno]["label_3rd"] = third
     return result
 
 
@@ -157,6 +162,8 @@ def build_rows(date_str, b_data, k_data):
                 "wind_speed": kinfo.get("wind_speed", 0),
                 "wave": kinfo.get("wave", 0),
                 "label": kinfo["label"],
+                "label_2nd": kinfo["label_2nd"],
+                "label_3rd": kinfo["label_3rd"],
             }
             ok = True
             for boat_no in range(1, 7):

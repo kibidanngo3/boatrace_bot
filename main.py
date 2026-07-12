@@ -795,27 +795,65 @@ def build_tickets(strategy, top1, top2, top3):
 
     return tickets
 
-def estimate_ticket_probability(ticket, probs):
+ORDER_MODEL_2ND_PATH = BASE_DIR / "order_model_2nd_v1.pkl"
+ORDER_MODEL_3RD_PATH = BASE_DIR / "order_model_3rd_v1.pkl"
+ORDER_MODEL_CONFIG_PATH = BASE_DIR / "order_model_config_v1.pkl"
+_order_models_cache = None
+
+def _load_order_models():
+    """2着・3着専用モデルを遅延ロードする。存在しなければ (None, None, None) を返し、
+    estimate_ticket_probability は Plackett-Luce近似にフォールバックする。"""
+    global _order_models_cache
+    if _order_models_cache is not None:
+        return _order_models_cache
+    if not (ORDER_MODEL_2ND_PATH.exists() and ORDER_MODEL_3RD_PATH.exists() and ORDER_MODEL_CONFIG_PATH.exists()):
+        _order_models_cache = (None, None, None)
+        return _order_models_cache
+    with open(ORDER_MODEL_2ND_PATH, "rb") as f: model_2nd = pickle.load(f)
+    with open(ORDER_MODEL_3RD_PATH, "rb") as f: model_3rd = pickle.load(f)
+    with open(ORDER_MODEL_CONFIG_PATH, "rb") as f: order_config = pickle.load(f)
+    _order_models_cache = (model_2nd, model_3rd, order_config)
+    return _order_models_cache
+
+def estimate_ticket_probability(ticket, probs, input_df=None):
     first, second, third = [int(x) for x in ticket.split("-")]
     p_first = probs[first - 1]
 
-    remaining_after_first = [i for i in range(1, 7) if i != first]
-    second_base = sum(probs[i - 1] for i in remaining_after_first)
-    p_second = probs[second - 1] / second_base if second_base > 0 else 0
+    model_2nd, model_3rd, order_config = _load_order_models()
+    if model_2nd is not None and input_df is not None:
+        x2 = input_df.copy()
+        x2["given_1st"] = first
+        raw2 = np.asarray(model_2nd.predict(x2[order_config["features_2nd"]]), dtype=float)[0]
+        raw2[first - 1] = 0
+        total2 = raw2.sum()
+        p_second = (raw2[second - 1] / total2) if total2 > 0 else 0
 
-    remaining_after_second = [i for i in remaining_after_first if i != second]
-    third_base = sum(probs[i - 1] for i in remaining_after_second)
-    p_third = probs[third - 1] / third_base if third_base > 0 else 0
+        x3 = input_df.copy()
+        x3["given_1st"] = first
+        x3["given_2nd"] = second
+        raw3 = np.asarray(model_3rd.predict(x3[order_config["features_3rd"]]), dtype=float)[0]
+        raw3[first - 1] = 0
+        raw3[second - 1] = 0
+        total3 = raw3.sum()
+        p_third = (raw3[third - 1] / total3) if total3 > 0 else 0
+    else:
+        remaining_after_first = [i for i in range(1, 7) if i != first]
+        second_base = sum(probs[i - 1] for i in remaining_after_first)
+        p_second = probs[second - 1] / second_base if second_base > 0 else 0
+
+        remaining_after_second = [i for i in remaining_after_first if i != second]
+        third_base = sum(probs[i - 1] for i in remaining_after_second)
+        p_third = probs[third - 1] / third_base if third_base > 0 else 0
 
     return p_first * p_second * p_third
 
-def add_expected_values(tickets, probs, odds_map, strategy):
+def add_expected_values(tickets, probs, odds_map, strategy, input_df=None):
     enriched = []
     for ticket in tickets:
         odds = odds_map.get(ticket)
         if not odds:
             continue
-        probability = estimate_ticket_probability(ticket, probs)
+        probability = estimate_ticket_probability(ticket, probs, input_df)
         expected_value = probability * odds
         if expected_value >= MIN_EXPECTED_VALUE:
             enriched.append({
@@ -920,7 +958,7 @@ def predict_single(model, config, scraper, course, rno, date_str, bankroll, kell
 
         tickets = build_tickets(strategy, top1, top2, top3)
         odds_map = scraper.fetch_odds3t(course, rno, date_str)
-        value_tickets = add_expected_values(tickets, probs, odds_map, strategy) if odds_map else []
+        value_tickets = add_expected_values(tickets, probs, odds_map, strategy, input_df) if odds_map else []
         if odds_map and not value_tickets:
             print(f"  - {course} {rno}R: No tickets over EV {MIN_EXPECTED_VALUE:.2f}")
             return None, 0
