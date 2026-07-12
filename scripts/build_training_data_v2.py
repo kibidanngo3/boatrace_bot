@@ -31,9 +31,14 @@ B_BASE = "https://www1.mbrace.or.jp/od2/B"
 K_BASE = "https://www1.mbrace.or.jp/od2/K"
 
 RANK_RE = r"(A1|A2|B1|B2)"
+RATE_RE = r"\d{1,3}\.\d{2}"
 BOAT_LINE_RE = re.compile(
     r"^(?P<boatno>\d) (?P<no>\d{4})(?P<name>.+?)(?P<age>\d{2})(?P<branch>..)"
-    r"(?P<weight>\d{2,3})(?P<rank>" + RANK_RE + r")\s+(?P<win_rate>[\d.]+)"
+    r"(?P<weight>\d{2,3})(?P<rank>" + RANK_RE + r")\s*"
+    r"(?P<win_rate>" + RATE_RE + r")\s*(?P<national_2_rate>" + RATE_RE + r")\s*"
+    r"(?P<local_win_rate>" + RATE_RE + r")\s*(?P<local_2_rate>" + RATE_RE + r")\s*"
+    r"(?P<motor_no>\d+)\s*(?P<motor_2_rate>" + RATE_RE + r")\s*"
+    r"(?P<boat_no>\d+)\s*(?P<boat_2_rate>" + RATE_RE + r")"
 )
 K_BOAT_LINE_RE = re.compile(
     r"^\s*\d{2}\s+(?P<boatno>\d)\s+\d{4}\s+.+?\s+\d+\s+\d+\s+(?P<ex_time>[\d.]+)\s+\d\s+(?P<st>[\d.]+)\s+"
@@ -94,6 +99,12 @@ def parse_b_file(text):
             result[venue][rno][boatno] = {
                 "rank": bm.group("rank"),
                 "win_rate": bm.group("win_rate"),
+                "national_2_rate": bm.group("national_2_rate"),
+                "local_win_rate": bm.group("local_win_rate"),
+                "local_2_rate": bm.group("local_2_rate"),
+                "motor_2_rate": bm.group("motor_2_rate"),
+                "boat_2_rate": bm.group("boat_2_rate"),
+                "weight": bm.group("weight"),
             }
     return result
 
@@ -176,6 +187,12 @@ def build_rows(date_str, b_data, k_data):
                     break
                 row[f"rank_{boat_no}"] = b["rank"]
                 row[f"win_rate_{boat_no}"] = b["win_rate"]
+                row[f"national_2_rate_{boat_no}"] = b["national_2_rate"]
+                row[f"local_win_rate_{boat_no}"] = b["local_win_rate"]
+                row[f"local_2_rate_{boat_no}"] = b["local_2_rate"]
+                row[f"motor_2_rate_{boat_no}"] = b["motor_2_rate"]
+                row[f"boat_2_rate_{boat_no}"] = b["boat_2_rate"]
+                row[f"weight_{boat_no}"] = b["weight"]
                 row[f"ex_time_{boat_no}"] = k["ex_time"]
                 row[f"st_{boat_no}"] = k["st"]
             if ok:
