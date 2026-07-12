@@ -11,3 +11,5 @@ bot_state.json
 
 training_data*.csv
 backtest_checkpoint*.csv
+lzh_cache/
+chunk_*.csv

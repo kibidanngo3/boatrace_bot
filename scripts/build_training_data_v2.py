@@ -68,15 +68,29 @@ def clean_venue(name):
     return None
 
 
-def fetch_lha_text(url, session):
-    res = session.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
-    if res.status_code != 200 or len(res.content) < 100:
-        return None
-    lha = lhafile.LhaFile(io.BytesIO(res.content))
+CACHE_DIR = Path(__file__).resolve().parent.parent / "lzh_cache"
+
+
+def _decode_lzh(content):
+    lha = lhafile.LhaFile(io.BytesIO(content))
     info = lha.infolist()
     if not info:
         return None
     return lha.read(info[0].filename).decode("cp932", errors="replace")
+
+
+def fetch_lha_text(url, session):
+    """.lzhをlzh_cache/にキャッシュする。次回以降、特徴量を追加して再パースする際は
+    ダウンロードを省いてローカルファイルから読み直せる。"""
+    cache_path = CACHE_DIR / url.rsplit("/", 1)[-1]
+    if cache_path.exists():
+        return _decode_lzh(cache_path.read_bytes())
+    res = session.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
+    if res.status_code != 200 or len(res.content) < 100:
+        return None
+    CACHE_DIR.mkdir(exist_ok=True)
+    cache_path.write_bytes(res.content)
+    return _decode_lzh(res.content)
 
 
 def parse_b_file(text):
