@@ -13,3 +13,9 @@ training_data*.csv
 backtest_checkpoint*.csv
 lzh_cache/
 chunk_*.csv
+odds_result_cache.csv
+*.bak
+
+# v6 特徴量は検証の結果見送り(model_evaluation_log.md参照)。モデルはコミットしない
+model_v6_*.pkl
+order_model_*_v6.pkl
