@@ -8,3 +8,5 @@ venv/
 notified_races.log
 predictions.csv
 bot_state.json
+
+training_data*.csv

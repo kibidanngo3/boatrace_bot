@@ -20,8 +20,8 @@ JST = timezone(timedelta(hours=9), 'JST')
 
 # パスの自動解決：GitHub Actions等の環境でも確実にファイルを見つける
 BASE_DIR = Path(__file__).resolve().parent
-MODEL_PATH = BASE_DIR / "final_model_v4.pkl"
-CONFIG_PATH = BASE_DIR / "model_config_v4.pkl"
+MODEL_PATH = BASE_DIR / "final_model_v5.pkl"
+CONFIG_PATH = BASE_DIR / "model_config_v5.pkl"
 
 # 通知済みログファイル (スクリプトと同じ場所に作成)
 LOG_FILE = BASE_DIR / "notified_races.log"
@@ -1121,6 +1121,17 @@ def run_live_patrol():
             with open(MODEL_PATH, "rb") as f: model = pickle.load(f)
             with open(CONFIG_PATH, "rb") as f: config = pickle.load(f)
             print("✅ Model loaded successfully.")
+
+            if state.get("notified_model_version") != MODEL_PATH.name:
+                send_discord_message(
+                    f"🔄 予測モデルを更新しました: `{MODEL_PATH.name}`\n"
+                    f"学習日: {config.get('date_trained', '不明')}\n"
+                    f"（このメッセージ以降の予測は新モデルによるものです）",
+                    "model version update",
+                )
+                state["notified_model_version"] = MODEL_PATH.name
+                save_state(state)
+
             hit_count = scan_and_notify(model, config, scraper, now_jst, date_str, run_at, state)
     else:
         print(f"  💤 Outside operating hours ({OPERATING_HOUR_START}:00-{OPERATING_HOUR_END}:00 JST). Skipping schedule scan.")
