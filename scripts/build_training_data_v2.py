@@ -25,7 +25,11 @@ from main import BoatRaceScraperV5  # noqa: E402
 
 KNOWN_VENUES = sorted(BoatRaceScraperV5.COURSE_MAP.keys(), key=len, reverse=True)
 _label_idx = _BASE_FIELDNAMES.index("label")
-FIELDNAMES = _BASE_FIELDNAMES[: _label_idx + 1] + ["label_2nd", "label_3rd"] + _BASE_FIELDNAMES[_label_idx + 1 :]
+_wave_idx = _BASE_FIELDNAMES.index("wave")
+FIELDNAMES = (
+    _BASE_FIELDNAMES[: _wave_idx] + ["wind_dir"] + _BASE_FIELDNAMES[_wave_idx : _label_idx + 1]
+    + ["label_2nd", "label_3rd"] + _BASE_FIELDNAMES[_label_idx + 1 :]
+)
 
 B_BASE = "https://www1.mbrace.or.jp/od2/B"
 K_BASE = "https://www1.mbrace.or.jp/od2/K"
@@ -47,7 +51,7 @@ RACE_HEADER_RE = re.compile(r"^\s*(\d{1,2})Ｒ")
 K_RACE_HEADER_RE = re.compile(r"^\s*(\d{1,2})R\s")
 PAYOUT_LINE_RE = re.compile(r"^\s*(\d{1,2})R\s+(\d-\d-\d)\s+(\d+)")
 VENUE_RE = re.compile(r"ボートレース(.+)$")
-WIND_RE = re.compile(r"風\s*\S*?\s*(\d+)m")
+WIND_RE = re.compile(r"風\s*(?P<dir>\S*?)\s*(?P<speed>\d+)m")
 WAVE_RE = re.compile(r"波\s*\S*?(\d+)cm")
 DEADLINE_RE = re.compile(r"締切予定([0-9０-９]{1,2})[:：]([0-9０-９]{2})")
 
@@ -134,7 +138,8 @@ def parse_k_file(text):
             wave = WAVE_RE.search(line)
             if venue:
                 result[venue].setdefault(rno, {"boats": {}})
-                result[venue][rno]["wind_speed"] = int(wind.group(1)) if wind else 0
+                result[venue][rno]["wind_speed"] = int(wind.group("speed")) if wind else 0
+                result[venue][rno]["wind_dir"] = wind.group("dir") if wind else ""
                 result[venue][rno]["wave"] = int(wave.group(1)) if wave else 0
             continue
         bm = K_BOAT_LINE_RE.match(line)
@@ -171,6 +176,7 @@ def build_rows(date_str, b_data, k_data):
                 "rno": rno,
                 "deadline": "",
                 "wind_speed": kinfo.get("wind_speed", 0),
+                "wind_dir": kinfo.get("wind_dir", ""),
                 "wave": kinfo.get("wave", 0),
                 "label": kinfo["label"],
                 "label_2nd": kinfo["label_2nd"],
