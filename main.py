@@ -913,8 +913,7 @@ def predict_single(model, config, scraper, course, rno, date_str, bankroll, kell
                 strategy = "FOCUS"
             elif top1[1] >= STANDARD_TOP_THRESHOLD:
                 strategy = "STANDARD"
-            else:
-                strategy = "WIDE"
+            # WIDE (top1 < STANDARD_TOP_THRESHOLD) is disabled: backtests showed 0 hits
         
         if not strategy:
             return None, 0
