@@ -28,6 +28,9 @@ from main import (  # noqa: E402
     IN_JUMP_THRESHOLD, FOCUS_TOP_THRESHOLD, STANDARD_TOP_THRESHOLD,
 )
 
+RESULT_FIELDS = ["date", "course", "rno", "strategy", "stake", "return", "hit", "has_bet", "odds"]
+_checkpoint_lock = threading.Lock()
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 _thread_local = threading.local()
 
@@ -58,24 +61,26 @@ def determine_strategy(probs):
 
 def process_race(race, probs, delay):
     scraper = get_scraper()
+    base = {"date": race["date"], "course": race["course"], "rno": race["rno"]}
     strategy, top1, top2, top3 = determine_strategy(probs)
     if not strategy:
         return None
 
+    input_df = build_features(pd.DataFrame([race]))
     tickets = build_tickets(strategy, top1, top2, top3)
     odds_map = scraper.fetch_odds3t(race["course"], race["rno"], race["date"])
     time.sleep(delay)
     if not odds_map:
         return None
 
-    value_tickets = add_expected_values(tickets, probs, odds_map, strategy)
+    value_tickets = add_expected_values(tickets, probs, odds_map, strategy, input_df)
     if not value_tickets:
-        return {"strategy": strategy, "stake": 0, "return": 0, "hit": False, "has_bet": False}
+        return {**base, "strategy": strategy, "stake": 0, "return": 0, "hit": False, "has_bet": False, "odds": None}
 
     value_tickets = add_kelly_stakes(value_tickets, STARTING_BANKROLL, KELLY_FRACTION)
     staked = [t for t in value_tickets if t["stake"] > 0]
     if not staked:
-        return {"strategy": strategy, "stake": 0, "return": 0, "hit": False, "has_bet": False}
+        return {**base, "strategy": strategy, "stake": 0, "return": 0, "hit": False, "has_bet": False, "odds": None}
 
     result = scraper.fetch_race_result(race["course"], race["rno"], race["date"])
     time.sleep(delay)
@@ -88,14 +93,12 @@ def process_race(race, probs, delay):
     return_amount = int(matched["stake"] / 100 * result["payout"]) if is_hit else 0
 
     return {
+        **base,
         "strategy": strategy,
         "stake": stake,
         "return": return_amount,
         "hit": is_hit,
         "has_bet": True,
-        "course": race["course"],
-        "rno": race["rno"],
-        "date": race["date"],
         "odds": matched["odds"] if is_hit else None,
     }
 
@@ -109,7 +112,30 @@ def main():
     parser.add_argument("--delay", type=float, default=0.3)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--min-date", default=None, help="この日付以降のみ対象にする(学習データとの重複=過学習を避けるため)")
+    parser.add_argument("--checkpoint", default="backtest_checkpoint.csv", help="結果を逐次保存し、中断しても再開できるようにするファイル")
     args = parser.parse_args()
+
+    checkpoint_path = BASE_DIR / args.checkpoint
+    done_keys = set()
+    checkpoint_results = []
+    if checkpoint_path.exists():
+        with open(checkpoint_path, encoding="utf-8-sig") as f:
+            for r in csv.DictReader(f):
+                key = (r["date"], r["course"], r["rno"])
+                done_keys.add(key)
+                checkpoint_results.append({
+                    "date": r["date"], "course": r["course"], "rno": r["rno"],
+                    "strategy": r["strategy"], "stake": int(r["stake"]), "return": int(r["return"]),
+                    "hit": r["hit"] == "True", "has_bet": r["has_bet"] == "True",
+                    "odds": float(r["odds"]) if r["odds"] not in ("", "None") else None,
+                })
+        print(f"チェックポイントから{len(done_keys)}件を復元")
+    checkpoint_exists = checkpoint_path.exists()
+    checkpoint_f = open(checkpoint_path, "a", newline="", encoding="utf-8-sig")
+    checkpoint_writer = csv.DictWriter(checkpoint_f, fieldnames=RESULT_FIELDS)
+    if not checkpoint_exists:
+        checkpoint_writer.writeheader()
+        checkpoint_f.flush()
 
     with open(BASE_DIR / args.model, "rb") as f:
         model = pickle.load(f)
@@ -146,18 +172,28 @@ def main():
     sample = sample[: args.sample_size]
     print(f"サンプル数: {len(sample)} ({len(by_month)}ヶ月に分散)")
 
-    results = []
-    done = 0
+    remaining = [
+        (row, probs) for row, probs in sample
+        if (row["date"], row["course"], str(row["rno"])) not in done_keys
+    ]
+    print(f"未処理: {len(remaining)}件 (チェックポイント分を除く)")
+
+    results = list(checkpoint_results)
+    done = len(checkpoint_results)
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
-        futures = [executor.submit(process_race, row, probs, args.delay) for row, probs in sample]
+        futures = [executor.submit(process_race, row, probs, args.delay) for row, probs in remaining]
         for future in as_completed(futures):
             r = future.result()
             if r:
                 results.append(r)
+                with _checkpoint_lock:
+                    checkpoint_writer.writerow(r)
+                    checkpoint_f.flush()
             done += 1
             if done % 200 == 0:
                 print(f"  progress: {done}/{len(sample)}")
 
+    checkpoint_f.close()
     print(f"\n有効件数(オッズ取得成功): {len(results)}")
 
     def summarize(rs, label):

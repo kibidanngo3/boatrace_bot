@@ -10,3 +10,4 @@ predictions.csv
 bot_state.json
 
 training_data*.csv
+backtest_checkpoint*.csv
