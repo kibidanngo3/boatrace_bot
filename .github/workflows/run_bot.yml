@@ -49,7 +49,12 @@ jobs:
 
       - name: Run Patrol
         env:
+          # 未設定のチャンネルは main.py 側で DISCORD_WEBHOOK_URL にフォールバックする
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_WEBHOOK_URL_PREDICT: ${{ secrets.DISCORD_WEBHOOK_URL_PREDICT }}
+          DISCORD_WEBHOOK_URL_STATS: ${{ secrets.DISCORD_WEBHOOK_URL_STATS }}
+          DISCORD_WEBHOOK_URL_SYSTEM: ${{ secrets.DISCORD_WEBHOOK_URL_SYSTEM }}
+          DISCORD_WEBHOOK_URL_SCHEDULE: ${{ secrets.DISCORD_WEBHOOK_URL_SCHEDULE }}
         run: |
           python main.py
 
