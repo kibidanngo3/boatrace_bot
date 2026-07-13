@@ -1,0 +1,90 @@
+name: Test Discord Webhooks
+
+# チャンネル振り分けの動作確認用。手動実行のみ。
+# 確認が済んだらこのワークフローは削除してよい。
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-webhooks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Send a test notice to each channel
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_WEBHOOK_URL_PREDICT: ${{ secrets.DISCORD_WEBHOOK_URL_PREDICT }}
+          DISCORD_WEBHOOK_URL_STATS: ${{ secrets.DISCORD_WEBHOOK_URL_STATS }}
+          DISCORD_WEBHOOK_URL_SYSTEM: ${{ secrets.DISCORD_WEBHOOK_URL_SYSTEM }}
+          DISCORD_WEBHOOK_URL_SCHEDULE: ${{ secrets.DISCORD_WEBHOOK_URL_SCHEDULE }}
+        run: |
+          python - <<'PY'
+          import os
+
+          # main.py と同じ振り分けロジック(依存を増やさないためここで再現)
+          base = os.environ.get("DISCORD_WEBHOOK_URL")
+          channels = {
+              "predict":  os.environ.get("DISCORD_WEBHOOK_URL_PREDICT")  or base,
+              "stats":    os.environ.get("DISCORD_WEBHOOK_URL_STATS")    or base,
+              "system":   os.environ.get("DISCORD_WEBHOOK_URL_SYSTEM")   or base,
+              "schedule": os.environ.get("DISCORD_WEBHOOK_URL_SCHEDULE") or base,
+          }
+
+          labels = {
+              "predict":  "🎯 予想チャンネル",
+              "stats":    "📊 成績チャンネル",
+              "system":   "⚙️ システムチャンネル",
+              "schedule": "⏰ 締切スケジュールチャンネル",
+          }
+          env_names = {
+              "predict":  "DISCORD_WEBHOOK_URL_PREDICT",
+              "stats":    "DISCORD_WEBHOOK_URL_STATS",
+              "system":   "DISCORD_WEBHOOK_URL_SYSTEM",
+              "schedule": "DISCORD_WEBHOOK_URL_SCHEDULE",
+          }
+
+          import requests
+
+          print("=== 各チャンネルの設定状況 ===")
+          for key in channels:
+              dedicated = bool(os.environ.get(env_names[key]))
+              state = "専用Webhook" if dedicated else ("フォールバック(DISCORD_WEBHOOK_URL)" if base else "未設定")
+              print(f"  {key:<9}: {state}")
+
+          print("\n=== テスト送信 ===")
+          failed = []
+          for key, url in channels.items():
+              if not url:
+                  print(f"  {key}: URLが無いのでスキップ")
+                  failed.append(key)
+                  continue
+              dedicated = bool(os.environ.get(env_names[key]))
+              note = "専用Webhookに届いています" if dedicated else "⚠️ フォールバック中(専用Secretが未設定)"
+              content = (
+                  f"✅ **Webhookテスト: {labels[key]}**\n"
+                  f"このメッセージが `{labels[key]}` に表示されていれば振り分けは正常です。\n"
+                  f"状態: {note}"
+              )
+              r = requests.post(url, json={"content": content}, timeout=15)
+              ok = 200 <= r.status_code < 300
+              print(f"  {key}: {'OK' if ok else 'FAILED ' + str(r.status_code)}")
+              if not ok:
+                  failed.append(key)
+
+          if failed:
+              raise SystemExit(f"送信に失敗したチャンネル: {failed}")
+          print("\n全チャンネルへの送信に成功しました。")
+          PY
