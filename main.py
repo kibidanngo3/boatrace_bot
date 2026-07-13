@@ -47,6 +47,14 @@ OPERATING_HOUR_END = 22    # 22:00 JST (ナイター開催を考慮)
 SCHEDULE_FAILURE_ALERT_THRESHOLD = 3
 SCHEDULE_FAILURE_ALERT_INTERVAL = 3
 
+# ヘルスチェック: 「Actionsはsuccessなのに実は壊れている」サイレント故障を検知する。
+# 過去に bot-state が一度も作られず実績が蓄積されない障害や、連敗カウントが
+# 残り続けてケリー係数が半減しっぱなしになる障害を、誰も気づかないまま踏んでいる。
+HEALTH_NO_BET_HOURS = 6          # 稼働時間中にこの時間ベットが1件も出なければ警告
+HEALTH_UNSETTLED_HOURS = 3       # 締切からこの時間が過ぎても決着しない予想が滞留したら警告
+HEALTH_UNSETTLED_COUNT = 3       # 上記の滞留がこの件数を超えたら警告
+HEALTH_ALERT_COOLDOWN_HOURS = 6  # 同じ種類の警告を連投しない間隔
+
 STARTING_BANKROLL = 10000  # 元手資金 (円)
 KELLY_FRACTION = 0.25      # 1/4ケリー (モデル誤差を考慮して保守的に)
 MAX_RACE_STAKE_RATIO = 0.10  # 1レースあたりの賭け金上限 (バンクロールに対する比率)
@@ -287,6 +295,91 @@ def settle_prediction_logs(scraper, now_jst, state):
             writer.writerows(rows)
         print(f"  Settled prediction logs: {settled_count}")
     return settled_count
+
+def _alert_on_cooldown(state, key, now_jst):
+    """同じ警告を連投しないためのクールダウン判定。出してよければFalseを返す。"""
+    last = state.get(f"health_alert_{key}")
+    if not last:
+        return False
+    try:
+        last_dt = datetime.fromisoformat(last)
+    except ValueError:
+        return False
+    return (now_jst - last_dt) < timedelta(hours=HEALTH_ALERT_COOLDOWN_HOURS)
+
+
+def run_health_checks(state, now_jst, scrape_ok):
+    """Actionsがsuccessでも中身が壊れているケースを検知して #システム に警告する。
+
+    ここで見ているのは「静かに壊れる」種類の異常だけで、クラッシュ系は既に
+    fatal error 通知でカバーされている。
+    """
+    alerts = []
+    rows = _load_prediction_rows()
+
+    # (1) 実績の消失: predictions.csv の行数が前回より減った
+    #     = 状態の永続化が壊れて履歴がリセットされた疑い(過去に実際に起きた障害)
+    prev_count = state.get("health_prediction_rows")
+    current_count = len(rows)
+    if prev_count is not None and current_count < prev_count:
+        alerts.append(
+            f"🗂️ **予想ログが減っています**（{prev_count}行 → {current_count}行）\n"
+            f"bot-stateブランチからの復元に失敗し、実績が失われている可能性があります。"
+        )
+    state["health_prediction_rows"] = current_count
+
+    # (2) 稼働時間中なのに長時間ベットが出ていない
+    #     = スクレイピング破損・モデル異常・条件が厳しすぎる等の兆候
+    if scrape_ok and OPERATING_HOUR_START <= now_jst.hour < OPERATING_HOUR_END:
+        last_bet = state.get("health_last_bet_at")
+        if last_bet:
+            try:
+                last_bet_dt = datetime.fromisoformat(last_bet)
+                idle_hours = (now_jst - last_bet_dt).total_seconds() / 3600
+                if idle_hours >= HEALTH_NO_BET_HOURS and not _alert_on_cooldown(state, "no_bet", now_jst):
+                    alerts.append(
+                        f"🕳️ **{idle_hours:.1f}時間ベットが出ていません**\n"
+                        f"最終ベット: {last_bet_dt.strftime('%m/%d %H:%M')}\n"
+                        f"スクレイピングの破損やモデルの異常が疑われます（相場次第で正常な場合もあります）。"
+                    )
+                    state["health_alert_no_bet"] = now_jst.isoformat()
+            except ValueError:
+                pass
+
+    # (3) 決着待ちの滞留: 締切を大きく過ぎても settled_at が埋まらない
+    #     = 結果ページの構造変更などで決着処理が回っていない疑い
+    stale = []
+    for row in rows:
+        if row.get("settled_at"):
+            continue
+        deadline = _prediction_deadline_datetime(row)
+        if deadline and (now_jst - deadline) > timedelta(hours=HEALTH_UNSETTLED_HOURS):
+            stale.append(row)
+    if len(stale) >= HEALTH_UNSETTLED_COUNT and not _alert_on_cooldown(state, "unsettled", now_jst):
+        sample = "、".join(f"{r.get('course')}{r.get('rno')}R" for r in stale[:3])
+        alerts.append(
+            f"⏳ **決着処理が滞留しています**（{len(stale)}件）\n"
+            f"例: {sample}\n"
+            f"結果ページの取得に失敗している可能性があります。"
+        )
+        state["health_alert_unsettled"] = now_jst.isoformat()
+
+    # (4) バンクロールの枯渇
+    bankroll = state.get("current_bankroll", STARTING_BANKROLL)
+    if bankroll < STAKE_PER_TICKET and not _alert_on_cooldown(state, "bankroll", now_jst):
+        alerts.append(
+            f"💸 **バンクロールが枯渇しました**（残り {bankroll:,}円）\n"
+            f"最小賭け金 {STAKE_PER_TICKET}円 を下回ったため、以降ベットできません。"
+        )
+        state["health_alert_bankroll"] = now_jst.isoformat()
+
+    for alert in alerts:
+        send_discord_message(f"⚠️ **ヘルスチェック警告**\n\n{alert}", "health check", channel="system")
+
+    if alerts:
+        print(f"  ⚠️ Health check raised {len(alerts)} alert(s)")
+    return len(alerts)
+
 
 RESULT_COLOR_HIT = 0x2ECC71
 RESULT_COLOR_MISS = 0x7F8C8D
@@ -1313,6 +1406,8 @@ def scan_and_notify(model, config, scraper, now_jst, date_str, run_at, state):
 
             # 通知済みリストに保存
             save_notified_race(race_id)
+            # ヘルスチェックの「長時間ベットが出ていない」判定に使う
+            state["health_last_bet_at"] = datetime.now(JST).isoformat()
         time.sleep(1)
 
     # 新たに予想を出した回だけ、未締切レースの締切順ダイジェストを更新する
@@ -1389,6 +1484,13 @@ def run_live_patrol():
             send_discord_message(monthly, "monthly performance summary", channel="stats")
         state["last_monthly_summary"] = current_month
         save_state(state)
+
+    # Actionsがsuccessでも静かに壊れているケースを検知する。
+    # スケジュール取得が失敗している最中は「ベットが出ない」のは当然なので、
+    # 二重に警告しないよう scrape_ok を渡して抑制する。
+    scrape_ok = state.get("consecutive_schedule_failures", 0) == 0
+    run_health_checks(state, datetime.now(JST), scrape_ok)
+    save_state(state)
 
     print(f"👮 Patrol Finished: Found {hit_count} hits.")
 
