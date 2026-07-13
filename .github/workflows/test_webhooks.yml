@@ -88,3 +88,58 @@ jobs:
               raise SystemExit(f"送信に失敗したチャンネル: {failed}")
           print("\n全チャンネルへの送信に成功しました。")
           PY
+
+      - name: Send a sample deadline digest (uses the real build_schedule_digest)
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_WEBHOOK_URL_PREDICT: ${{ secrets.DISCORD_WEBHOOK_URL_PREDICT }}
+          DISCORD_WEBHOOK_URL_STATS: ${{ secrets.DISCORD_WEBHOOK_URL_STATS }}
+          DISCORD_WEBHOOK_URL_SYSTEM: ${{ secrets.DISCORD_WEBHOOK_URL_SYSTEM }}
+          DISCORD_WEBHOOK_URL_SCHEDULE: ${{ secrets.DISCORD_WEBHOOK_URL_SCHEDULE }}
+        run: |
+          pip install -r requirements.txt
+          python - <<'PY'
+          import csv, json
+          from datetime import datetime, timedelta
+          import main
+
+          # 本番と同じ形式のダミー予想(未決着・締切がこれから)を書き、
+          # 本番の build_schedule_digest / send_discord_embed をそのまま通す。
+          now = datetime.now(main.JST)
+          races = [
+              ("蒲郡", 5, 6, {"3-1-2": {"stake": 100}, "3-4-2": {"stake": 200}}),
+              ("江戸川", 11, 14, {"2-1-3": {"stake": 200}}),
+              ("津", 7, 40, {"3-1-2": {"stake": 400}}),
+              ("丸亀", 3, 55, {"2-5-1": {"stake": 100}, "2-1-6": {"stake": 100}}),
+          ]
+          rows = []
+          for course, rno, mins, details in races:
+              deadline = now + timedelta(minutes=mins)
+              rows.append({
+                  "date": now.strftime("%Y%m%d"),
+                  "course": course,
+                  "rno": str(rno),
+                  "deadline": deadline.strftime("%H:%M"),
+                  "ticket_count": str(len(details)),
+                  "stake": "",
+                  "ticket_details": json.dumps(details, ensure_ascii=False),
+              })
+
+          with open(main.PREDICTION_LOG_FILE, "w", newline="", encoding="utf-8-sig") as f:
+              w = csv.DictWriter(f, fieldnames=main.PREDICTION_LOG_FIELDS, extrasaction="ignore")
+              w.writeheader()
+              w.writerows(rows)
+
+          digest = main.build_schedule_digest(now)
+          if not digest:
+              raise SystemExit("ダイジェストが生成されませんでした")
+
+          print("生成されたダイジェスト:")
+          print(digest["title"])
+          print(digest["description"])
+
+          ok = main.send_discord_embed(digest, "webhook test digest", channel="schedule")
+          if not ok:
+              raise SystemExit("ダイジェストの送信に失敗しました")
+          print("\n締切スケジュールのサンプルを送信しました。")
+          PY
