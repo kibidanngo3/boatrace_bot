@@ -6,6 +6,8 @@
 
 GitHub Actionsの`schedule`トリガーは実行タイミングが大きく遅延・間引きされ信頼できないため、外部サービス [cron-job.org](https://cron-job.org) から `workflow_dispatch` をHTTPで叩く方式で動かしている。
 
+実測（2026-07-13、6時間分）では、`cron: '3-59/15 * * * *'`（15分おき）を指定しても`schedule`は**2回しか発火しなかった**（本来24回）。さらに稀に発火した回が`concurrency`の`cancel-in-progress`によってcron-job.orgからの本来の実行をキャンセルする事故も起きていたため、**`schedule`トリガーはワークフローから完全に削除した**。定期実行はcron-job.orgに一本化している。
+
 - cron-job.orgが7:00〜21:00 JSTの間、15分おきに以下を呼び出す
   ```
   POST https://api.github.com/repos/kibidanngo3/boatrace_bot/actions/workflows/run_bot.yml/dispatches

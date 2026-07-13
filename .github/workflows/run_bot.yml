@@ -8,9 +8,11 @@ concurrency:
   cancel-in-progress: true
 
 on:
-  schedule:
-    # 混雑しやすい00分を避けて15分おきに実行
-    - cron: '3-59/15 * * * *'
+  # GitHubのscheduleトリガーは使わない。15分おき(3-59/15)を指定しても実際には
+  # 1〜2時間に1回程度まで間引かれるため「締切5〜35分前」の窓を捕まえられず、
+  # さらに稀に発火した回が concurrency の cancel-in-progress によって
+  # cron-job.org からの本来の実行をキャンセルしてしまっていた。
+  # 定期実行は cron-job.org からの workflow_dispatch に一本化する(README参照)。
   workflow_dispatch:
 
 jobs:
