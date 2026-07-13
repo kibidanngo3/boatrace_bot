@@ -18,6 +18,19 @@ from datetime import datetime, timedelta, timezone
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 JST = timezone(timedelta(hours=9), 'JST')
 
+# 通知先チャンネルの分割。未設定のものは DISCORD_WEBHOOK_URL にフォールバックするため、
+# Secretsを追加しなければ従来どおり全て同じチャンネルに流れる。
+#   predict  : 投資チャンス(買い目)の通知
+#   stats    : 日次・週次・月次の成績サマリー
+#   system   : クラッシュ・スケジュール取得失敗・モデル更新
+#   schedule : 締切順ダイジェスト
+WEBHOOKS = {
+    "predict": os.environ.get("DISCORD_WEBHOOK_URL_PREDICT") or DISCORD_WEBHOOK_URL,
+    "stats": os.environ.get("DISCORD_WEBHOOK_URL_STATS") or DISCORD_WEBHOOK_URL,
+    "system": os.environ.get("DISCORD_WEBHOOK_URL_SYSTEM") or DISCORD_WEBHOOK_URL,
+    "schedule": os.environ.get("DISCORD_WEBHOOK_URL_SCHEDULE") or DISCORD_WEBHOOK_URL,
+}
+
 # パスの自動解決：GitHub Actions等の環境でも確実にファイルを見つける
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = BASE_DIR / "final_model_v5.pkl"
@@ -359,13 +372,14 @@ def _safe_int(value):
     except Exception:
         return 0
 
-def send_discord_message(content, label):
-    if not DISCORD_WEBHOOK_URL:
-        print(f"    ⚠️ DISCORD_WEBHOOK_URL is not set ({label})")
+def send_discord_message(content, label, channel="predict"):
+    webhook = WEBHOOKS.get(channel) or DISCORD_WEBHOOK_URL
+    if not webhook:
+        print(f"    ⚠️ Webhook for '{channel}' is not set ({label})")
         return False
     try:
         response = requests.post(
-            DISCORD_WEBHOOK_URL,
+            webhook,
             json={"content": content},
             timeout=15
         )
@@ -378,13 +392,14 @@ def send_discord_message(content, label):
         print(f"    ❌ Discord Exception ({label}): {e}")
     return False
 
-def send_discord_embed(embed, label):
-    if not DISCORD_WEBHOOK_URL:
-        print(f"    ⚠️ DISCORD_WEBHOOK_URL is not set ({label})")
+def send_discord_embed(embed, label, channel="predict"):
+    webhook = WEBHOOKS.get(channel) or DISCORD_WEBHOOK_URL
+    if not webhook:
+        print(f"    ⚠️ Webhook for '{channel}' is not set ({label})")
         return False
     try:
         response = requests.post(
-            DISCORD_WEBHOOK_URL,
+            webhook,
             json={"embeds": [embed]},
             timeout=15
         )
@@ -426,6 +441,54 @@ def format_ticket_formation(ticket_details):
                 f"`{ticket}` ¥{detail['stake']:,}｜{detail['odds']:.1f}倍｜EV{detail['expected_value']:.2f}"
             )
     return summary_lines, detail_lines
+
+def build_schedule_digest(now_jst):
+    """まだ締め切っていない本日の予想レースを、締切順に並べたEmbedを返す。
+
+    Botは15分おきに走り、EV条件を満たさず見送ったレースは通知済みにならないため、
+    後の実行で条件を満たすと「締切が前のレース」が後から通知される。その結果
+    Discordのタイムライン上では締切が前後して見えるので、都度この一覧を出して
+    「今どれをどの順で見ればいいか」を一目で分かるようにする。
+    """
+    rows = _load_prediction_rows()
+    today = now_jst.strftime("%Y%m%d")
+
+    pending = []
+    for row in rows:
+        if row.get("date") != today or row.get("settled_at"):
+            continue
+        deadline = _prediction_deadline_datetime(row)
+        if not deadline or deadline <= now_jst:
+            continue
+        pending.append((deadline, row))
+
+    if not pending:
+        return None
+
+    pending.sort(key=lambda x: x[0])
+    lines = []
+    for deadline, row in pending:
+        minutes = int((deadline - now_jst).total_seconds() // 60)
+        stake = _safe_int(row.get("stake"))
+        if not stake:
+            try:
+                details = json.loads(row.get("ticket_details") or "{}")
+                stake = sum(d.get("stake", 0) for d in details.values())
+            except (json.JSONDecodeError, TypeError):
+                stake = 0
+        count = row.get("ticket_count") or "?"
+        lines.append(
+            f"`{deadline.strftime('%H:%M')}` **{row.get('course')} {row.get('rno')}R**"
+            f"｜あと{minutes}分｜{count}点 ¥{stake:,}"
+        )
+
+    return {
+        "title": f"⏰ 締切スケジュール（未締切 {len(pending)}件）",
+        "description": "\n".join(lines),
+        "color": 0x2ECC71,
+        "footer": {"text": f"{now_jst.strftime('%H:%M')} 時点｜上から順に締め切ります"},
+        "timestamp": now_jst.isoformat(),
+    }
 
 def _prediction_deadline_datetime(row):
     try:
@@ -1087,6 +1150,7 @@ def scan_and_notify(model, config, scraper, now_jst, date_str, run_at, state):
                 f"⚠️ **スケジュール取得が{failures}回連続で失敗しています**\n"
                 f"boatrace.jpの構造変更やアクセス制限の可能性があります。",
                 "schedule fetch failure",
+                channel="system",
             )
             state["last_schedule_alert_count"] = failures
     else:
@@ -1171,6 +1235,12 @@ def scan_and_notify(model, config, scraper, now_jst, date_str, run_at, state):
             save_notified_race(race_id)
         time.sleep(1)
 
+    # 新たに予想を出した回だけ、未締切レースの締切順ダイジェストを更新する
+    if hit_count:
+        digest = build_schedule_digest(datetime.now(JST))
+        if digest:
+            send_discord_embed(digest, "schedule digest", channel="schedule")
+
     return hit_count
 
 def run_live_patrol():
@@ -1210,6 +1280,7 @@ def run_live_patrol():
                     f"学習日: {config.get('date_trained', '不明')}\n"
                     f"（このメッセージ以降の予測は新モデルによるものです）",
                     "model version update",
+                    channel="system",
                 )
                 state["notified_model_version"] = MODEL_PATH.name
                 save_state(state)
@@ -1221,13 +1292,13 @@ def run_live_patrol():
     if settled_count:
         summary = build_performance_summary(run_at)
         if summary:
-            send_discord_message(summary, "daily performance summary")
+            send_discord_message(summary, "daily performance summary", channel="stats")
 
     current_week = run_at.strftime("%G-W%V")
     if run_at.weekday() == 6 and run_at.hour == 23 and state.get("last_weekly_summary") != current_week:
         weekly = build_weekly_summary(run_at)
         if weekly:
-            send_discord_message(weekly, "weekly performance summary")
+            send_discord_message(weekly, "weekly performance summary", channel="stats")
         state["last_weekly_summary"] = current_week
         save_state(state)
 
@@ -1235,7 +1306,7 @@ def run_live_patrol():
     if _is_last_day_of_month(run_at.date()) and run_at.hour == 23 and state.get("last_monthly_summary") != current_month:
         monthly = build_monthly_summary(run_at)
         if monthly:
-            send_discord_message(monthly, "monthly performance summary")
+            send_discord_message(monthly, "monthly performance summary", channel="stats")
         state["last_monthly_summary"] = current_month
         save_state(state)
 
@@ -1251,5 +1322,6 @@ if __name__ == "__main__":
         send_discord_message(
             f"🚨 **Boatrace Patrol クラッシュ**\n```\n{error_text[-1500:]}\n```",
             "fatal error",
+            channel="system",
         )
         raise
