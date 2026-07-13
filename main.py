@@ -378,6 +378,55 @@ def send_discord_message(content, label):
         print(f"    ❌ Discord Exception ({label}): {e}")
     return False
 
+def send_discord_embed(embed, label):
+    if not DISCORD_WEBHOOK_URL:
+        print(f"    ⚠️ DISCORD_WEBHOOK_URL is not set ({label})")
+        return False
+    try:
+        response = requests.post(
+            DISCORD_WEBHOOK_URL,
+            json={"embeds": [embed]},
+            timeout=15
+        )
+        if 200 <= response.status_code < 300:
+            print(f"    Discord embed sent: {label}")
+            return True
+        print(f"    ❌ Discord Error ({label}): status={response.status_code}")
+        print(f"    Response: {response.text[:300]}")
+    except Exception as e:
+        print(f"    ❌ Discord Exception ({label}): {e}")
+    return False
+
+STRATEGY_COLORS = {
+    "IN_JUMP": 0xE74C3C,
+    "FOCUS": 0x3498DB,
+    "STANDARD": 0xF1C40F,
+    "WIDE": 0x9B59B6,
+}
+
+def format_ticket_formation(ticket_details):
+    """{"2-1-3": {...}, "2-1-4": {...}} を 1着→2着→3着候補 のフォーメーション表示にまとめる。
+    戻り値は (サマリー行のリスト, 買い目ごとの詳細行のリスト)。詳細行はサマリーと同じ並び順。
+    """
+    groups = {}
+    for ticket in ticket_details:
+        first, second, third = ticket.split("-")
+        groups.setdefault((int(first), int(second)), []).append(int(third))
+
+    summary_lines = []
+    detail_lines = []
+    for (first, second), thirds in sorted(groups.items()):
+        thirds = sorted(thirds)
+        third_text = "・".join(str(t) for t in thirds)
+        summary_lines.append(f"**{first} → {second} → {third_text}**（{len(thirds)}点）")
+        for third in thirds:
+            ticket = f"{first}-{second}-{third}"
+            detail = ticket_details[ticket]
+            detail_lines.append(
+                f"`{ticket}` ¥{detail['stake']:,}｜{detail['odds']:.1f}倍｜EV{detail['expected_value']:.2f}"
+            )
+    return summary_lines, detail_lines
+
 def _prediction_deadline_datetime(row):
     try:
         return datetime.strptime(
@@ -1048,7 +1097,7 @@ def scan_and_notify(model, config, scraper, now_jst, date_str, run_at, state):
     # 2. 現在のターゲット (5分〜35分前) を抽出
     targets = []
     print(f"[{datetime.now(JST).strftime('%H:%M:%S')}] 🔍 Filtering targets from schedule...")
-    for (course, rno), (time_str, race_url) in sorted(all_races.items()):
+    for (course, rno), (time_str, race_url) in sorted(all_races.items(), key=lambda kv: (kv[1][0], kv[0])):
         try:
             race_dt = datetime.strptime(f"{date_str} {time_str}", "%Y%m%d %H:%M").replace(tzinfo=JST)
             diff = (race_dt - now_jst).total_seconds() / 60
@@ -1079,29 +1128,42 @@ def scan_and_notify(model, config, scraper, now_jst, date_str, run_at, state):
 
         if status == 1:
             hit_count += 1
-            # Discord通知処理 (フォーマットを調整)
-            content = f"🎯 **投資チャンス到来！**\n📍 **{res['場名']} {res['レース']}** (締切 {res['締切']})\n"
-            content += f"━━━━━━━━━━━━━━━━━━━━\n🔥 戦略: **{res['戦略']}**\n😱 イン飛び率: `{res['イン飛び率']:.1%}`\n\n"
-            content += f"🏠 **1号艇勝率**: `{res['1号艇勝率']:.1%}`\n"
+            # Discord通知処理 (Embed表示)
+            ticket_details = res.get("買い目内訳", {})
+            summary_lines, detail_lines = format_ticket_formation(ticket_details)
+            total_stake = sum(detail["stake"] for detail in ticket_details.values())
 
-            content += f"📊 **AI勝率ランキング (1抜き)**\n"
-            content += f"🥇 **{res['1位'][0]}号艇**: `{res['1位'][1]:.1%}`\n"
-            content += f"🥈 **{res['2位'][0]}号艇**: `{res['2位'][1]:.1%}`\n"
-            content += f"🥉 **{res['3位'][0]}号艇**: `{res['3位'][1]:.1%}`\n"
-
+            ranking_lines = [
+                f"🥇 **{res['1位'][0]}号艇** `{res['1位'][1]:.1%}`",
+                f"🥈 **{res['2位'][0]}号艇** `{res['2位'][1]:.1%}`",
+                f"🥉 **{res['3位'][0]}号艇** `{res['3位'][1]:.1%}`",
+            ]
             for idx, item in enumerate(res["4位以下"], start=4):
-                content += f"{idx}位 **{item[0]}号艇**: `{item[1]:.1%}`\n"
+                ranking_lines.append(f"{idx}位 **{item[0]}号艇** `{item[1]:.1%}`")
 
-            content += "\n"
+            evaluation_lines = [
+                f"イン飛び率 `{res['イン飛び率']:.1%}`",
+                f"1号艇勝率 `{res['1号艇勝率']:.1%}`",
+            ]
             if res["期待値MAX"] is not None:
-                content += f"📈 最大期待値: `{res['期待値MAX']:.2f}`\n"
-            content += f"📝 根拠: {res['根拠']}\n💰 推奨({res['点数']}点): `{res['買い目']}`\n"
-            if res.get("買い目内訳"):
-                total_stake = sum(detail["stake"] for detail in res["買い目内訳"].values())
-                content += f"💴 合計賭け金: `{total_stake:,}円` (バンクロール `{res['バンクロール']:,}円` 基準)\n"
-            content += "━━━━━━━━━━━━━━━━━━━━"
+                evaluation_lines.append(f"最大期待値 `{res['期待値MAX']:.2f}`")
 
-            send_discord_message(content, race_id)
+            embed = {
+                "title": f"🎯 {res['場名']} {res['レース']}｜締切 {res['締切']}",
+                "description": "\n".join(summary_lines) + "\n\n" + "\n".join(detail_lines),
+                "color": STRATEGY_COLORS.get(res["戦略"], 0x95A5A6),
+                "fields": [
+                    {"name": "レース評価", "value": "\n".join(evaluation_lines), "inline": True},
+                    {"name": "AI勝率ランキング", "value": "\n".join(ranking_lines), "inline": True},
+                    {"name": "判断根拠", "value": res["根拠"], "inline": False},
+                ],
+                "footer": {
+                    "text": f"{res['戦略']}｜合計 {total_stake:,}円｜バンクロール {res['バンクロール']:,}円"
+                },
+                "timestamp": datetime.now(JST).isoformat(),
+            }
+
+            send_discord_embed(embed, race_id)
 
             save_prediction_log(race_id, race, res, run_at)
 
