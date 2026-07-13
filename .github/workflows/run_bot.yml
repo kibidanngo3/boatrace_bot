@@ -88,6 +88,30 @@ jobs:
             echo "no state changes to commit"
           fi
 
+      - name: Publish dashboard to gh-pages
+        if: always()
+        run: |
+          python scripts/build_dashboard.py
+          git config user.name "boatrace-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git fetch origin gh-pages 2>/dev/null || true
+          if git rev-parse --verify origin/gh-pages >/dev/null 2>&1; then
+            git worktree add pages-worktree -B gh-pages origin/gh-pages
+          else
+            git worktree add pages-worktree -B gh-pages
+            rm -rf pages-worktree/* 2>/dev/null || true
+          fi
+          cp docs/index.html pages-worktree/index.html
+          touch pages-worktree/.nojekyll
+          cd pages-worktree
+          git add -f index.html .nojekyll
+          if ! git diff --cached --quiet; then
+            git commit -m "Update dashboard"
+            git push origin HEAD:gh-pages
+          else
+            echo "no dashboard changes to commit"
+          fi
+
       - name: Upload prediction log
         if: always()
         uses: actions/upload-artifact@v4

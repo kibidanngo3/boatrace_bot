@@ -19,3 +19,6 @@ odds_result_cache.csv
 # v6 特徴量は検証の結果見送り(model_evaluation_log.md参照)。モデルはコミットしない
 model_v6_*.pkl
 order_model_*_v6.pkl
+
+# ダッシュボードはgh-pagesへ自動公開する生成物
+docs/

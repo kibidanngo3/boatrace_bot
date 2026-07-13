@@ -74,6 +74,7 @@ PREDICTION_LOG_FIELDS = [
     "ticket_details",
     "bankroll_at_bet",
     "reason",
+    "discord_message_id",  # 確定後にその予想通知へ結果を追記するために保持する
     "result_ticket",
     "result_payout",
     "is_hit",
@@ -160,8 +161,9 @@ def save_state(state):
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False)
 
-def save_prediction_log(race_id, race, result, run_at):
+def save_prediction_log(race_id, race, result, run_at, discord_message_id=None):
     row = {
+        "discord_message_id": discord_message_id or "",
         "run_at": run_at.isoformat(),
         "race_id": race_id,
         "date": run_at.strftime("%Y%m%d"),
@@ -275,6 +277,9 @@ def settle_prediction_logs(scraper, now_jst, state):
         })
         settled_count += 1
 
+        # 元の予想通知に結果を追記する(通知を見返すだけで的中/ハズレが分かるように)
+        append_result_to_prediction_notice(row, result, is_hit, stake, return_amount, profit)
+
     if settled_count:
         with open(PREDICTION_LOG_FILE, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.DictWriter(f, fieldnames=PREDICTION_LOG_FIELDS, extrasaction="ignore")
@@ -282,6 +287,56 @@ def settle_prediction_logs(scraper, now_jst, state):
             writer.writerows(rows)
         print(f"  Settled prediction logs: {settled_count}")
     return settled_count
+
+RESULT_COLOR_HIT = 0x2ECC71
+RESULT_COLOR_MISS = 0x7F8C8D
+
+def append_result_to_prediction_notice(row, result, is_hit, stake, return_amount, profit):
+    """確定した予想の元通知(Embed)を編集し、結果を追記する。
+
+    予想時にWebhookから受け取ったメッセージIDを使って元メッセージを書き換えるので、
+    タイムラインを見返すだけで的中/ハズレと収支が分かる。IDが無い(旧データや
+    送信失敗)場合は何もしない。
+    """
+    message_id = row.get("discord_message_id")
+    if not message_id:
+        return
+
+    try:
+        ticket_details = json.loads(row.get("ticket_details") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        ticket_details = {}
+
+    if is_hit:
+        head = f"✅ **的中！** `{result['ticket']}` {result['payout']:,}円"
+        color = RESULT_COLOR_HIT
+    else:
+        head = f"❌ ハズレ（結果 `{result['ticket']}`）"
+        color = RESULT_COLOR_MISS
+
+    profit_text = f"+{profit:,}" if profit >= 0 else f"{profit:,}"
+    result_value = (
+        f"{head}\n"
+        f"投資 `{stake:,}円` / 払戻 `{return_amount:,}円` / 収支 **`{profit_text}円`**"
+    )
+
+    ticket_lines = []
+    for ticket, detail in ticket_details.items():
+        mark = "🎯" if ticket == result["ticket"] else "・"
+        ticket_lines.append(
+            f"{mark} `{ticket}` ¥{detail.get('stake', 0):,}｜{detail.get('odds', 0):.1f}倍"
+        )
+
+    embed = {
+        "title": f"{'✅' if is_hit else '❌'} {row.get('course')} {row.get('rno')}R｜締切 {row.get('deadline')}",
+        "description": "\n".join(ticket_lines),
+        "color": color,
+        "fields": [
+            {"name": "結果", "value": result_value, "inline": False},
+        ],
+        "footer": {"text": f"{row.get('strategy')}｜確定済み"},
+    }
+    edit_discord_embed(message_id, embed, f"result {row.get('race_id')}")
 
 def _load_prediction_rows():
     if not PREDICTION_LOG_FILE.exists():
@@ -392,24 +447,48 @@ def send_discord_message(content, label, channel="predict"):
         print(f"    ❌ Discord Exception ({label}): {e}")
     return False
 
-def send_discord_embed(embed, label, channel="predict"):
+def send_discord_embed(embed, label, channel="predict", return_message_id=False):
+    """Embedを送る。return_message_id=True なら送信したメッセージのIDを返す
+    (?wait=true を付けるとWebhookのレスポンスに作成されたメッセージが入る)。
+    レース確定後にそのメッセージへ結果を追記するために使う。"""
     webhook = WEBHOOKS.get(channel) or DISCORD_WEBHOOK_URL
     if not webhook:
         print(f"    ⚠️ Webhook for '{channel}' is not set ({label})")
-        return False
+        return None if return_message_id else False
     try:
-        response = requests.post(
-            webhook,
-            json={"embeds": [embed]},
-            timeout=15
-        )
+        url = webhook + ("?wait=true" if return_message_id else "")
+        response = requests.post(url, json={"embeds": [embed]}, timeout=15)
         if 200 <= response.status_code < 300:
             print(f"    Discord embed sent: {label}")
+            if return_message_id:
+                try:
+                    return response.json().get("id")
+                except ValueError:
+                    return None
             return True
         print(f"    ❌ Discord Error ({label}): status={response.status_code}")
         print(f"    Response: {response.text[:300]}")
     except Exception as e:
         print(f"    ❌ Discord Exception ({label}): {e}")
+    return None if return_message_id else False
+
+def edit_discord_embed(message_id, embed, label, channel="predict"):
+    """既に送ったEmbedを編集する(結果の追記に使う)。"""
+    webhook = WEBHOOKS.get(channel) or DISCORD_WEBHOOK_URL
+    if not webhook or not message_id:
+        return False
+    try:
+        response = requests.patch(
+            f"{webhook}/messages/{message_id}",
+            json={"embeds": [embed]},
+            timeout=15,
+        )
+        if 200 <= response.status_code < 300:
+            print(f"    Discord embed edited: {label}")
+            return True
+        print(f"    ❌ Discord edit error ({label}): status={response.status_code}")
+    except Exception as e:
+        print(f"    ❌ Discord edit exception ({label}): {e}")
     return False
 
 STRATEGY_COLORS = {
@@ -1227,9 +1306,10 @@ def scan_and_notify(model, config, scraper, now_jst, date_str, run_at, state):
                 "timestamp": datetime.now(JST).isoformat(),
             }
 
-            send_discord_embed(embed, race_id)
+            # メッセージIDを控えておき、レース確定後にこの通知へ結果を追記する
+            message_id = send_discord_embed(embed, race_id, return_message_id=True)
 
-            save_prediction_log(race_id, race, res, run_at)
+            save_prediction_log(race_id, race, res, run_at, discord_message_id=message_id)
 
             # 通知済みリストに保存
             save_notified_race(race_id)
