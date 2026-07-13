@@ -42,8 +42,7 @@ cron-job.orgに登録しているGitHubのFine-grained PATは **2026年10月6日
   - `KELLY_FRACTION = 0.25`: 1/4ケリー（モデル誤差を考慮して保守的に）
   - `MAX_RACE_STAKE_RATIO = 0.10`: 1レースあたりの賭け金上限（バンクロールの10%）
   - `DAILY_LOSS_LIMIT_RATIO = 0.20`: その日の損失がバンクロールの20%に達したら以降の新規ベットを停止（決済・サマリー送信は継続）
-  - `LOSING_STREAK_THRESHOLD = 3` / `LOSING_STREAK_KELLY_MULTIPLIER = 0.5`: 3連敗したらケリー係数を半分に縮小し、勝つまで維持
-- 現在のバンクロール・その日の開始時点バンクロール・連敗数は`bot_state.json`に保存される
+- 現在のバンクロール・その日の開始時点バンクロールは`bot_state.json`に保存される
 - バンクロールを手動でリセットしたい場合は、後述の`bot-state`ブランチ上の`bot_state.json`を直接編集する
 
 ## 状態の永続化 (predictions.csv / bot_state.json)

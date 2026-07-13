@@ -38,8 +38,6 @@ STARTING_BANKROLL = 10000  # 元手資金 (円)
 KELLY_FRACTION = 0.25      # 1/4ケリー (モデル誤差を考慮して保守的に)
 MAX_RACE_STAKE_RATIO = 0.10  # 1レースあたりの賭け金上限 (バンクロールに対する比率)
 DAILY_LOSS_LIMIT_RATIO = 0.20    # その日の損失がバンクロールの20%に達したら以降ベット停止
-LOSING_STREAK_THRESHOLD = 3     # 3連敗で
-LOSING_STREAK_KELLY_MULTIPLIER = 0.5  # ケリー係数を半分に縮小
 
 PREDICTION_LOG_FIELDS = [
     "run_at",
@@ -251,11 +249,6 @@ def settle_prediction_logs(scraper, now_jst, state):
         roi = (return_amount / stake) if stake else 0
 
         state["current_bankroll"] = state.get("current_bankroll", STARTING_BANKROLL) + profit
-        if stake > 0:
-            if is_hit:
-                state["consecutive_losses"] = 0
-            else:
-                state["consecutive_losses"] = state.get("consecutive_losses", 0) + 1
 
         row.update({
             "result_ticket": result["ticket"],
@@ -879,14 +872,14 @@ def add_kelly_stakes(value_tickets, bankroll, kelly_fraction=KELLY_FRACTION):
         edge = item["probability"] - (1 - total_prob) / net_odds
         fraction = max(edge, 0.0) * kelly_fraction
         raw_stake = bankroll * fraction
-        item["stake"] = int(raw_stake // STAKE_PER_TICKET) * STAKE_PER_TICKET
+        item["stake"] = round(raw_stake / STAKE_PER_TICKET) * STAKE_PER_TICKET
 
     total_stake = sum(item["stake"] for item in value_tickets)
     max_total = bankroll * MAX_RACE_STAKE_RATIO
     if total_stake > max_total > 0:
         scale = max_total / total_stake
         for item in value_tickets:
-            item["stake"] = int((item["stake"] * scale) // STAKE_PER_TICKET) * STAKE_PER_TICKET
+            item["stake"] = round(item["stake"] * scale / STAKE_PER_TICKET) * STAKE_PER_TICKET
 
     return value_tickets
 
@@ -1030,11 +1023,7 @@ def scan_and_notify(model, config, scraper, now_jst, date_str, run_at, state):
             print(f"  🛑 Daily loss limit reached ({daily_loss_ratio:.1%} >= {DAILY_LOSS_LIMIT_RATIO:.0%}). Skipping for today.")
             return 0
 
-    consecutive_losses = state.get("consecutive_losses", 0)
     kelly_fraction = KELLY_FRACTION
-    if consecutive_losses >= LOSING_STREAK_THRESHOLD:
-        kelly_fraction *= LOSING_STREAK_KELLY_MULTIPLIER
-        print(f"  📉 {consecutive_losses}連敗中: ケリー係数を{kelly_fraction:.3f}に縮小")
 
     # 1. 1日の全スケジュールを取得 (初回、または1時間ごとに更新すると効率的)
     all_races = scraper.fetch_all_venue_schedules(date_str)
