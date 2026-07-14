@@ -32,3 +32,5 @@ pred_tmp.csv
 exhibition_data.csv
 exhibition_fetch.log
 odds_fetch.log
+odds_train_cache.csv
+odds_drift_samples.csv
