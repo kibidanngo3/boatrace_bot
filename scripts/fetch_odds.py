@@ -21,8 +21,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from main import BoatRaceScraperV5  # noqa: E402
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-CACHE = BASE_DIR / "odds_result_cache.csv"
 FIELDS = ["date", "course", "rno", "result_ticket", "payout", "odds_json"]
+# 学習期間用: 着順は training_data.csv の label/label_2nd/label_3rd から復元できるので、
+# 結果ページは取らずオッズページだけ取る(取得ページ数が半分になる)
+FIELDS_ODDS_ONLY = ["date", "course", "rno", "odds_json"]
 
 _lock = threading.Lock()
 _thread_local = threading.local()
@@ -34,13 +36,18 @@ def get_scraper():
     return _thread_local.scraper
 
 
-def fetch(race, delay):
+def fetch(race, delay, odds_only=False):
     scraper = get_scraper()
     try:
         odds_map = scraper.fetch_odds3t(race["course"], race["rno"], race["date"])
         time.sleep(delay)
         if not odds_map:
             return None
+        if odds_only:
+            return {
+                "date": race["date"], "course": race["course"], "rno": race["rno"],
+                "odds_json": json.dumps(odds_map),
+            }
         result = scraper.fetch_race_result(race["course"], race["rno"], race["date"])
         time.sleep(delay)
         if not result:
@@ -56,11 +63,18 @@ def fetch(race, delay):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--min-date", default="20260512", help="ホールドアウトの開始日")
+    parser.add_argument("--min-date", default="20260512", help="この日以降を対象にする")
+    parser.add_argument("--max-date", default=None, help="この日より前を対象にする(学習期間を取るとき)")
+    parser.add_argument("--odds-only", action="store_true",
+                        help="結果ページを取らずオッズだけ取る(着順は training_data.csv から復元できる)")
+    parser.add_argument("--output", default="odds_result_cache.csv")
     parser.add_argument("--workers", type=int, default=16)
     parser.add_argument("--delay", type=float, default=0.1)
     parser.add_argument("--limit", type=int, default=None)
     args = parser.parse_args()
+
+    CACHE = BASE_DIR / args.output
+    fields = FIELDS_ODDS_ONLY if args.odds_only else FIELDS
 
     done = set()
     if CACHE.exists():
@@ -74,6 +88,7 @@ def main():
             {"date": r["date"], "course": r["course"], "rno": int(r["rno"])}
             for r in csv.DictReader(f)
             if r["date"] >= args.min_date
+            and (args.max_date is None or r["date"] < args.max_date)
         ]
     todo = [r for r in races
             if (r["date"], r["course"], str(r["rno"])) not in done]
@@ -85,7 +100,7 @@ def main():
 
     exists = CACHE.exists()
     f = open(CACHE, "a", newline="", encoding="utf-8-sig")
-    writer = csv.DictWriter(f, fieldnames=FIELDS)
+    writer = csv.DictWriter(f, fieldnames=fields)
     if not exists:
         writer.writeheader()
         f.flush()
@@ -93,7 +108,7 @@ def main():
     ok = 0
     start = time.time()
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
-        futures = [ex.submit(fetch, r, args.delay) for r in todo]
+        futures = [ex.submit(fetch, r, args.delay, args.odds_only) for r in todo]
         for i, fut in enumerate(as_completed(futures), 1):
             r = fut.result()
             if r:
