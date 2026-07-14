@@ -640,7 +640,6 @@ def build_schedule_digest(now_jst):
     pending.sort(key=lambda x: x[0])
     lines = []
     for deadline, row in pending:
-        minutes = int((deadline - now_jst).total_seconds() // 60)
         stake = _safe_int(row.get("stake"))
         if not stake:
             try:
@@ -649,16 +648,19 @@ def build_schedule_digest(now_jst):
             except (json.JSONDecodeError, TypeError):
                 stake = 0
         count = row.get("ticket_count") or "?"
+        # <t:UNIX:R> はDiscordクライアント側が現在時刻から相対表示を描画するため、
+        # 投稿後に時間が経っても「あと◯分」が古いまま残らない
+        rel = f"<t:{int(deadline.timestamp())}:R>"
         lines.append(
             f"`{deadline.strftime('%H:%M')}` **{row.get('course')} {row.get('rno')}R**"
-            f"｜あと{minutes}分｜{count}点 ¥{stake:,}"
+            f"｜{rel}｜{count}点 ¥{stake:,}"
         )
 
     return {
         "title": f"⏰ 締切スケジュール（未締切 {len(pending)}件）",
         "description": "\n".join(lines),
         "color": 0x2ECC71,
-        "footer": {"text": f"{now_jst.strftime('%H:%M')} 時点｜上から順に締め切ります"},
+        "footer": {"text": "上から順に締め切ります"},
         "timestamp": now_jst.isoformat(),
     }
 
@@ -1384,9 +1386,18 @@ def scan_and_notify(model, config, scraper, now_jst, date_str, run_at, state):
             if res["期待値MAX"] is not None:
                 evaluation_lines.append(f"最大期待値 `{res['期待値MAX']:.2f}`")
 
+            # 締切までの残り時間はDiscord側で描画させ、通知が流れても古い値が残らないようにする
+            deadline_dt = _prediction_deadline_datetime(
+                {"date": date_str, "deadline": res["締切"]}
+            )
+            # 締切が取得できず 00:00 になった場合は過去時刻になるので表示しない
+            countdown = ""
+            if deadline_dt and deadline_dt > now_jst:
+                countdown = f"⏰ 締切 <t:{int(deadline_dt.timestamp())}:R>\n\n"
+
             embed = {
                 "title": f"🎯 {res['場名']} {res['レース']}｜締切 {res['締切']}",
-                "description": "\n".join(summary_lines) + "\n\n" + "\n".join(detail_lines),
+                "description": countdown + "\n".join(summary_lines) + "\n\n" + "\n".join(detail_lines),
                 "color": STRATEGY_COLORS.get(res["戦略"], 0x95A5A6),
                 "fields": [
                     {"name": "レース評価", "value": "\n".join(evaluation_lines), "inline": True},
