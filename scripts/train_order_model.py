@@ -19,10 +19,7 @@ import lightgbm as lgb
 import pandas as pd
 from sklearn.metrics import accuracy_score, log_loss
 
-from train_model import build_features, FEATURES, BASE_DIR  # noqa: E402
-
-FEATURES_2ND = FEATURES + ["given_1st"]
-FEATURES_3RD = FEATURES + ["given_1st", "given_2nd"]
+from train_model import build_features, FEATURES, FEATURES_NO_ST, BASE_DIR  # noqa: E402
 
 PARAMS = {
     "objective": "multiclass",
@@ -56,7 +53,15 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", default="training_data.csv")
     parser.add_argument("--valid-days", type=int, default=60)
+    parser.add_argument("--drop-st", action="store_true", help="漏洩する st_i を特徴量から外す")
+    parser.add_argument("--suffix", default="v1", help="保存ファイル名の接尾辞")
     args = parser.parse_args()
+
+    base = FEATURES_NO_ST if args.drop_st else FEATURES
+    features_2nd = base + ["given_1st"]
+    features_3rd = base + ["given_1st", "given_2nd"]
+    if args.drop_st:
+        print("※ st_i(本番STによる漏洩特徴量)を除外して学習する")
 
     df = pd.read_csv(BASE_DIR / args.input, dtype=str, encoding="utf-8-sig")
     df = df.dropna(subset=["label", "label_2nd", "label_3rd"])
@@ -71,8 +76,8 @@ def main():
     valid_df = df[df["date"] >= cutoff_date].reset_index(drop=True)
     print(f"学習: {len(train_df)}件 / 検証: {len(valid_df)}件 (cutoff={cutoff_date})")
 
-    base_train = build_features(train_df.copy())
-    base_valid = build_features(valid_df.copy())
+    base_train = build_features(train_df.copy(), base)
+    base_valid = build_features(valid_df.copy(), base)
 
     # --- 2着モデル: 実際の1着艇番を追加特徴量として与える ---
     print("\n=== 2着モデル学習 ===")
@@ -82,7 +87,7 @@ def main():
     X2_valid["given_1st"] = valid_df["label"].values
     y2_train = train_df["label_2nd"].values - 1
     y2_valid = valid_df["label_2nd"].values - 1
-    model_2nd = train_one(X2_train[FEATURES_2ND], y2_train, X2_valid[FEATURES_2ND], y2_valid)
+    model_2nd = train_one(X2_train[features_2nd], y2_train, X2_valid[features_2nd], y2_valid)
 
     # --- 3着モデル: 実際の1着・2着艇番を追加特徴量として与える ---
     print("\n=== 3着モデル学習 ===")
@@ -94,15 +99,16 @@ def main():
     X3_valid["given_2nd"] = valid_df["label_2nd"].values
     y3_train = train_df["label_3rd"].values - 1
     y3_valid = valid_df["label_3rd"].values - 1
-    model_3rd = train_one(X3_train[FEATURES_3RD], y3_train, X3_valid[FEATURES_3RD], y3_valid)
+    model_3rd = train_one(X3_train[features_3rd], y3_train, X3_valid[features_3rd], y3_valid)
 
-    with open(BASE_DIR / "order_model_2nd_v1.pkl", "wb") as f:
+    with open(BASE_DIR / f"order_model_2nd_{args.suffix}.pkl", "wb") as f:
         pickle.dump(model_2nd, f)
-    with open(BASE_DIR / "order_model_3rd_v1.pkl", "wb") as f:
+    with open(BASE_DIR / f"order_model_3rd_{args.suffix}.pkl", "wb") as f:
         pickle.dump(model_3rd, f)
-    with open(BASE_DIR / "order_model_config_v1.pkl", "wb") as f:
-        pickle.dump({"features_2nd": FEATURES_2ND, "features_3rd": FEATURES_3RD, "params": PARAMS}, f)
-    print("\n保存しました: order_model_2nd_v1.pkl, order_model_3rd_v1.pkl, order_model_config_v1.pkl")
+    with open(BASE_DIR / f"order_model_config_{args.suffix}.pkl", "wb") as f:
+        pickle.dump({"features_2nd": features_2nd, "features_3rd": features_3rd, "params": PARAMS}, f)
+    print(f"\n保存しました: order_model_2nd_{args.suffix}.pkl, "
+          f"order_model_3rd_{args.suffix}.pkl, order_model_config_{args.suffix}.pkl")
 
 
 if __name__ == "__main__":

@@ -22,3 +22,8 @@ order_model_*_v6.pkl
 
 # ダッシュボードはgh-pagesへ自動公開する生成物
 docs/
+
+# レビューワークフローの生成物
+review-result.md
+review.diff
+pred_tmp.csv

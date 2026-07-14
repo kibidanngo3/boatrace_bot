@@ -27,6 +27,11 @@ for boat_no in range(1, 7):
         f"ex_diff_{boat_no}", f"ex_rank_{boat_no}", f"st_{boat_no}",
     ])
 
+# st_i は K ファイル(競走成績)の「スタートタイミング」= 本番レースで実際に切ったST。
+# レース前には存在しない情報なので、学習に使うとデータ漏洩になる。
+# 実際、本番の main.py はこの列に常に定数 0.15 を入れており、学習時と別物を食わせていた。
+FEATURES_NO_ST = [f for f in FEATURES if not f.startswith("st_")]
+
 
 def to_float(value, default=0.0):
     try:
@@ -35,8 +40,11 @@ def to_float(value, default=0.0):
         return default
 
 
-def build_features(df):
-    """main.py predict_single() と同じロジックで特徴量を作る(1行=1レース)。"""
+def build_features(df, features=None):
+    """main.py predict_single() と同じロジックで特徴量を作る(1行=1レース)。
+
+    features に FEATURES_NO_ST を渡すと、漏洩する st_i を除いた特徴量だけを返す。
+    """
     ex_cols = [f"ex_time_{i}" for i in range(1, 7)]
     for c in ex_cols:
         df[c] = df[c].apply(to_float)
@@ -44,6 +52,11 @@ def build_features(df):
 
     # ex_rank_i: レースごとに6艇のex_timeを method='min' で順位付け(main.pyのpandas rankと同じ)
     ex_ranks = df[ex_cols].rank(axis=1, method="min")
+
+    features = features or FEATURES
+    # st_i を要求されていない限り触らない。本番(main.py)はもうSTを取得しないため、
+    # ライブ由来のデータには st_ 列が存在せず、無条件に読むと KeyError になる。
+    want_st = any(f.startswith("st_") for f in features)
 
     out = pd.DataFrame(index=df.index)
     out["wind_speed"] = df["wind_speed"].apply(to_float)
@@ -55,10 +68,11 @@ def build_features(df):
         out[f"ex_time_{i}"] = df[f"ex_time_{i}"].apply(to_float)
         out[f"ex_diff_{i}"] = out[f"ex_time_{i}"] - ex_mean
         out[f"ex_rank_{i}"] = ex_ranks[f"ex_time_{i}"]
-        out[f"st_{i}"] = df[f"st_{i}"].apply(to_float)
+        if want_st:
+            out[f"st_{i}"] = df[f"st_{i}"].apply(to_float)
 
     out["is_debuff_1"] = ((out["rank_val_1"] <= 2) & (out["ex_rank_1"] >= 4)).astype(int)
-    return out[FEATURES]
+    return out[features]
 
 
 def calibration_report(y_true_boat1_win, p_boat1_win, label):
@@ -85,6 +99,7 @@ def main():
     parser.add_argument("--config-out", default="model_config_v5.pkl")
     parser.add_argument("--num-boost-round", type=int, default=2000)
     parser.add_argument("--early-stopping-rounds", type=int, default=50)
+    parser.add_argument("--drop-st", action="store_true", help="漏洩する st_i を特徴量から外す")
     args = parser.parse_args()
 
     input_path = BASE_DIR / args.input
@@ -105,8 +120,12 @@ def main():
     print(f"学習: {len(train_df)}件 ({train_df['date'].min()}〜{train_df['date'].max()})")
     print(f"検証: {len(valid_df)}件 ({valid_df['date'].min()}〜{valid_df['date'].max()}) [直近{args.valid_days}日をホールドアウト]")
 
-    X_train = build_features(train_df.reset_index(drop=True))
-    X_valid = build_features(valid_df.reset_index(drop=True))
+    features = FEATURES_NO_ST if args.drop_st else FEATURES
+    if args.drop_st:
+        print("※ st_i(本番STによる漏洩特徴量)を除外して学習する")
+
+    X_train = build_features(train_df.reset_index(drop=True), features)
+    X_valid = build_features(valid_df.reset_index(drop=True), features)
     y_train = train_df["label"].values - 1  # LightGBM multiclass は 0始まりが必須
     y_valid = valid_df["label"].values - 1
 
@@ -120,8 +139,8 @@ def main():
         "random_state": 42,
     }
 
-    train_set = lgb.Dataset(X_train, label=y_train, feature_name=FEATURES)
-    valid_set = lgb.Dataset(X_valid, label=y_valid, feature_name=FEATURES, reference=train_set)
+    train_set = lgb.Dataset(X_train, label=y_train, feature_name=features)
+    valid_set = lgb.Dataset(X_valid, label=y_valid, feature_name=features, reference=train_set)
 
     print("\n学習開始...")
     model = lgb.train(
@@ -156,9 +175,9 @@ def main():
     with open(model_path, "wb") as f:
         pickle.dump(model, f)
     with open(config_path, "wb") as f:
-        pickle.dump({"features": FEATURES, "params": params, "date_trained": pd.Timestamp.now().strftime("%Y%m%d")}, f)
+        pickle.dump({"features": features, "params": params, "date_trained": pd.Timestamp.now().strftime("%Y%m%d")}, f)
     print(f"\n保存しました: {model_path.name}, {config_path.name}")
-    print("(本番の final_model_v4.pkl はまだ置き換えていません。較正結果を確認してから判断してください)")
+    print("(本番が読むのは main.py の MODEL_PATH。切り替えるにはそこを書き換える)")
 
 
 if __name__ == "__main__":

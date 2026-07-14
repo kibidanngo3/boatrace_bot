@@ -33,8 +33,11 @@ WEBHOOKS = {
 
 # パスの自動解決：GitHub Actions等の環境でも確実にファイルを見つける
 BASE_DIR = Path(__file__).resolve().parent
-MODEL_PATH = BASE_DIR / "final_model_v5.pkl"
-CONFIG_PATH = BASE_DIR / "model_config_v5.pkl"
+# v7: st_i(Kファイルの「スタートタイミング」= 本番レースで実際に切ったST)を特徴量から除外して
+# 学習し直したモデル。v5までは未来の情報を学習に使っており、かつ本番では同じ列に定数0.15が
+# 入っていた(スクレイパーのセレクタが空振りしていた)。詳細は model_evaluation_log.md 参照。
+MODEL_PATH = BASE_DIR / "final_model_v7.pkl"
+CONFIG_PATH = BASE_DIR / "model_config_v7.pkl"
 
 # 通知済みログファイル (スクリプトと同じ場所に作成)
 LOG_FILE = BASE_DIR / "notified_races.log"
@@ -914,8 +917,8 @@ class BoatRaceScraperV5:
                 parts_text = tds[7].get_text(" ", strip=True) if len(tds) > 7 else ""
                 data[f"parts_{i}"] = parts_text
                 data[f"parts_count_{i}"] = len(tds[7].select(".label4")) if len(tds) > 7 else 0
-                st_text = tds[2].select_one(".is-fs11").text.strip() if tds[2].select_one(".is-fs11") else ".15"
-                data[f"st_{i}"] = float("0"+re.search(r"(\.\d+)", st_text).group(1)) if re.search(r"(\.\d+)", st_text) else 0.15
+                # かつてここで st_i を取ろうとしていたが、セレクタが空振りして全艇0.15固定になっていた。
+                # そもそもSTはレース後にしか確定せず特徴量として使えないため、取得ごと削除した(v7)。
                 data[f"rank_{i}"] = boat_info[i]["rank"]
                 data[f"win_rate_{i}"] = boat_info[i]["win_rate"]
                 for key in [
@@ -1068,9 +1071,9 @@ def build_tickets(strategy, top1, top2, top3):
         if len({a, b, c}) == 3
     ]
 
-ORDER_MODEL_2ND_PATH = BASE_DIR / "order_model_2nd_v1.pkl"
-ORDER_MODEL_3RD_PATH = BASE_DIR / "order_model_3rd_v1.pkl"
-ORDER_MODEL_CONFIG_PATH = BASE_DIR / "order_model_config_v1.pkl"
+ORDER_MODEL_2ND_PATH = BASE_DIR / "order_model_2nd_v7.pkl"
+ORDER_MODEL_3RD_PATH = BASE_DIR / "order_model_3rd_v7.pkl"
+ORDER_MODEL_CONFIG_PATH = BASE_DIR / "order_model_config_v7.pkl"
 _order_models_cache = None
 
 def _load_order_models():
@@ -1194,8 +1197,8 @@ def predict_single(model, config, scraper, course, rno, date_str, bankroll, kell
             input_dict[f"ex_time_{i}"] = data[f"ex_time_{i}"]
             input_dict[f"ex_diff_{i}"] = data[f"ex_time_{i}"] - ex_mean
             input_dict[f"ex_rank_{i}"] = ex_ranks[idx]
-            input_dict[f"st_{i}"] = data[f"st_{i}"]
-            
+            # st_i(スタートタイミング)はレース後にしか確定しないため特徴量から外した(v7)
+
         input_dict["is_debuff_1"] = 1 if (input_dict["rank_val_1"] <= 2 and input_dict["ex_rank_1"] >= 4) else 0
         
         input_df = pd.DataFrame([input_dict])[config["features"]]
@@ -1463,7 +1466,7 @@ def run_live_patrol():
             if state.get("notified_model_version") != MODEL_PATH.name:
                 send_discord_message(
                     f"🔄 予測モデルを更新しました: `{MODEL_PATH.name}`\n"
-                    f"学習日: {config.get('date_trained', '不明')}\n"
+                    f"学習日: {config.get('date_trained', '不明')} / 特徴量: {len(config.get('features', []))}個\n"
                     f"（このメッセージ以降の予測は新モデルによるものです）",
                     "model version update",
                     channel="system",
