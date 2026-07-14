@@ -19,7 +19,9 @@ import lightgbm as lgb
 import pandas as pd
 from sklearn.metrics import accuracy_score, log_loss
 
-from train_model import build_features, FEATURES, FEATURES_NO_ST, BASE_DIR  # noqa: E402
+from train_model import (  # noqa: E402
+    build_features, merge_exhibition, FEATURES, FEATURES_NO_ST, FEATURES_V8, BASE_DIR,
+)
 
 PARAMS = {
     "objective": "multiclass",
@@ -54,20 +56,29 @@ def main():
     parser.add_argument("--input", default="training_data.csv")
     parser.add_argument("--valid-days", type=int, default=60)
     parser.add_argument("--drop-st", action="store_true", help="漏洩する st_i を特徴量から外す")
+    parser.add_argument("--v8", action="store_true", help="スタート展示を特徴量に加える")
+    parser.add_argument("--exhibition", default="exhibition_data.csv")
     parser.add_argument("--suffix", default="v1", help="保存ファイル名の接尾辞")
     args = parser.parse_args()
 
-    base = FEATURES_NO_ST if args.drop_st else FEATURES
+    if args.v8:
+        base = FEATURES_V8
+        print("※ スタート展示(展示ST・進入コース)を特徴量に追加して学習する")
+    elif args.drop_st:
+        base = FEATURES_NO_ST
+        print("※ st_i(本番STによる漏洩特徴量)を除外して学習する")
+    else:
+        base = FEATURES
     features_2nd = base + ["given_1st"]
     features_3rd = base + ["given_1st", "given_2nd"]
-    if args.drop_st:
-        print("※ st_i(本番STによる漏洩特徴量)を除外して学習する")
 
     df = pd.read_csv(BASE_DIR / args.input, dtype=str, encoding="utf-8-sig")
     df = df.dropna(subset=["label", "label_2nd", "label_3rd"])
     for col in ("label", "label_2nd", "label_3rd"):
         df[col] = df[col].astype(int)
     df = df[df["label"].between(1, 6) & df["label_2nd"].between(1, 6) & df["label_3rd"].between(1, 6)]
+    if args.v8:
+        df = merge_exhibition(df, BASE_DIR / args.exhibition)
     df = df.sort_values("date")
 
     dates = sorted(df["date"].unique())

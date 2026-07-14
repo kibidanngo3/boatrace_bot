@@ -730,6 +730,54 @@ class BoatRaceScraperV5:
         return None
 
     @staticmethod
+    def _parse_start_exhibition(soup):
+        """スタート展示から「展示ST」と「進入コース」を読む(締切前に公開される正当な情報)。
+
+        表示は進入順に並んでいるので、行の並び順がそのまま進入コースになる。
+        STは ".19" の形式で、フライングは "F.07"(大時計より前に出ている)なので負値にする。
+        枠なりでないレース(前付け)では枠番と進入コースが一致せず、1号艇の勝率は実測で
+        約10pt下がる。旧モデルはこれを見ていなかった。
+
+        6艇そろわない場合(展示前など)は None を返す。
+        """
+        # クラス名(is-w238)決め打ちにはせず、艇番とSTのspanを持つ表を探す。
+        # レイアウト変更で別の表が先に来ても誤読しないようにするため。
+        table = next(
+            (t for t in soup.select("table")
+             if t.select_one("span.table1_boatImage1Number")
+             and t.select_one("span.table1_boatImage1Time")),
+            None,
+        )
+        if not table:
+            return None
+
+        data = {}
+        for lane, tr in enumerate(table.select("tbody tr"), start=1):
+            num = tr.select_one("span.table1_boatImage1Number")
+            st = tr.select_one("span.table1_boatImage1Time")
+            if not num or not st:
+                continue
+            try:
+                boat = int(num.get_text(strip=True))
+            except ValueError:
+                continue
+            if not 1 <= boat <= 6:
+                continue
+
+            text = st.get_text(strip=True)
+            m = re.search(r"(\d?\.\d+)", text)
+            if m:
+                value = float("0" + m.group(1)) if m.group(1).startswith(".") else float(m.group(1))
+                data[f"ex_st_{boat}"] = -value if text.upper().startswith("F") else value
+            else:
+                data[f"ex_st_{boat}"] = 0.16  # "L"(出遅れ)など。平均的な値で埋める
+            data[f"in_course_{boat}"] = lane
+
+        if len(data) != 12:  # 6艇 × (ex_st, in_course)
+            return None
+        return data
+
+    @staticmethod
     def _to_float(value, default=0.0):
         m = re.search(r"\d+(?:\.\d+)?", value or "")
         return float(m.group(0)) if m else default
@@ -903,8 +951,12 @@ class BoatRaceScraperV5:
             if len(rows) < 6:
                 print(f"  ⚠️ Beforeinfo rows are incomplete: {course} {rno}R rows={len(rows)}")
                 return None
-            
-            data = {"wind_speed": wind_speed, "wave": wave, "deadline": deadline_str}
+
+            # スタート展示はまだ公開されていないことがある。ここでは失敗させず、
+            # 実際にその特徴量を使うモデルのときだけ predict_single 側で弾く。
+            exhibition = self._parse_start_exhibition(soup_info) or {}
+
+            data = {"wind_speed": wind_speed, "wave": wave, "deadline": deadline_str, **exhibition}
             for i in range(1, 7):
                 tds = rows[i-1].select("td")
                 if len(tds) < 5:
@@ -1200,7 +1252,28 @@ def predict_single(model, config, scraper, course, rno, date_str, bankroll, kell
             # st_i(スタートタイミング)はレース後にしか確定しないため特徴量から外した(v7)
 
         input_dict["is_debuff_1"] = 1 if (input_dict["rank_val_1"] <= 2 and input_dict["ex_rank_1"] >= 4) else 0
-        
+
+        # スタート展示由来(v8)。まだ公開されていないレースでは data に入らない。
+        # その場合、この特徴量を使うモデルなら見送る。定数で埋めて誤魔化すと、
+        # v5 で起きた「学習と本番で別物を食わせる」事故を繰り返すことになる。
+        needs_exhibition = any(
+            f.startswith(("ex_st_", "ex_st_rank_", "in_course_")) or f == "is_wakunari"
+            for f in config["features"]
+        )
+        has_exhibition = all(f"ex_st_{i}" in data for i in range(1, 7))
+        if needs_exhibition and not has_exhibition:
+            print(f"  ⏭️ Start exhibition not published yet, skipping: {course} {rno}R")
+            return None, 0
+
+        if has_exhibition:
+            ex_st_vals = [data[f"ex_st_{i}"] for i in range(1, 7)]
+            ex_st_ranks = pd.Series(ex_st_vals).rank(method="min").tolist()
+            for i in range(1, 7):
+                input_dict[f"ex_st_{i}"] = ex_st_vals[i - 1]
+                input_dict[f"ex_st_rank_{i}"] = ex_st_ranks[i - 1]
+                input_dict[f"in_course_{i}"] = data[f"in_course_{i}"]
+            input_dict["is_wakunari"] = 1 if all(data[f"in_course_{i}"] == i for i in range(1, 7)) else 0
+
         input_df = pd.DataFrame([input_dict])[config["features"]]
         probs = np.asarray(predict_probs(model, input_df), dtype=float)
 

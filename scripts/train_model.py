@@ -32,12 +32,30 @@ for boat_no in range(1, 7):
 # 実際、本番の main.py はこの列に常に定数 0.15 を入れており、学習時と別物を食わせていた。
 FEATURES_NO_ST = [f for f in FEATURES if not f.startswith("st_")]
 
+# v8: スタート展示から取れる「締切前に確定している」情報を追加する(exhibition_data.csv)。
+#   ex_st_i     : 展示ST(フライングは負値)。当日の出足の実測値。
+#   ex_st_rank_i: レース内での展示STの速い順(1〜6)
+#   in_course_i : 進入コース。前付けがあると枠番と一致せず、1号艇が外に飛ばされると
+#                 勝率が激減するため、枠番だけを見ていた従来モデルには無い情報。
+#   is_wakunari : 6艇とも枠番どおりの進入(枠なり)なら1
+# いずれも本番の直前情報ページから締切前に取得できるので漏洩ではない。
+FEATURES_V8 = list(FEATURES_NO_ST)
+for boat_no in range(1, 7):
+    FEATURES_V8.extend([
+        f"ex_st_{boat_no}", f"ex_st_rank_{boat_no}", f"in_course_{boat_no}",
+    ])
+FEATURES_V8.append("is_wakunari")
+
 
 def to_float(value, default=0.0):
+    # float("nan") は例外にならないので、明示的に欠損を弾かないと default に落ちない
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return default
     try:
-        return float(value)
+        result = float(value)
     except (TypeError, ValueError):
         return default
+    return default if pd.isna(result) else result
 
 
 def build_features(df, features=None):
@@ -56,7 +74,8 @@ def build_features(df, features=None):
     features = features or FEATURES
     # st_i を要求されていない限り触らない。本番(main.py)はもうSTを取得しないため、
     # ライブ由来のデータには st_ 列が存在せず、無条件に読むと KeyError になる。
-    want_st = any(f.startswith("st_") for f in features)
+    want_st = any(f == f"st_{i}" for f in features for i in range(1, 7))
+    want_ex_st = any(f.startswith("ex_st_") for f in features)
 
     out = pd.DataFrame(index=df.index)
     out["wind_speed"] = df["wind_speed"].apply(to_float)
@@ -72,7 +91,38 @@ def build_features(df, features=None):
             out[f"st_{i}"] = df[f"st_{i}"].apply(to_float)
 
     out["is_debuff_1"] = ((out["rank_val_1"] <= 2) & (out["ex_rank_1"] >= 4)).astype(int)
+
+    if want_ex_st:
+        ex_st_cols = [f"ex_st_{i}" for i in range(1, 7)]
+        # 展示STが欠けている場合(取得失敗・L=出遅れ)は 0.16 前後の平均的な値で埋める
+        ex_st = df[ex_st_cols].apply(lambda c: c.map(lambda v: to_float(v, 0.16)))
+        ex_st_ranks = ex_st.rank(axis=1, method="min")
+        for i in range(1, 7):
+            out[f"ex_st_{i}"] = ex_st[f"ex_st_{i}"]
+            out[f"ex_st_rank_{i}"] = ex_st_ranks[f"ex_st_{i}"]
+            out[f"in_course_{i}"] = df[f"in_course_{i}"].apply(lambda v: to_float(v, i))
+        # 枠なり進入(全艇が枠番どおり)かどうか。前付けがあるレースは別物になる。
+        out["is_wakunari"] = (
+            sum((out[f"in_course_{i}"] == i).astype(int) for i in range(1, 7)) == 6
+        ).astype(int)
+
     return out[features]
+
+
+def merge_exhibition(df, path):
+    """exhibition_data.csv(展示ST・進入コース)を training_data と突合する。
+
+    取得できなかったレースは学習から落とす。定数で埋めると、本番で同じ列に別の値が
+    来たときに学習と推論がズレる(v5 の st_i で実際に起きた事故)。
+    """
+    ex = pd.read_csv(path, dtype={"date": str}, encoding="utf-8-sig")
+    ex["rno"] = ex["rno"].astype(str).astype(int)
+    df = df.copy()
+    df["rno"] = df["rno"].astype(str).astype(int)
+    before = len(df)
+    df = df.merge(ex, on=["date", "course", "rno"], how="inner")
+    print(f"スタート展示を突合: {before} → {len(df)}件 ({len(df)/before:.1%} が取得済み)")
+    return df
 
 
 def calibration_report(y_true_boat1_win, p_boat1_win, label):
@@ -100,6 +150,9 @@ def main():
     parser.add_argument("--num-boost-round", type=int, default=2000)
     parser.add_argument("--early-stopping-rounds", type=int, default=50)
     parser.add_argument("--drop-st", action="store_true", help="漏洩する st_i を特徴量から外す")
+    parser.add_argument("--v8", action="store_true",
+                        help="スタート展示(展示ST・進入コース)を特徴量に加える。exhibition_data.csv が必要")
+    parser.add_argument("--exhibition", default="exhibition_data.csv")
     args = parser.parse_args()
 
     input_path = BASE_DIR / args.input
@@ -110,6 +163,17 @@ def main():
     df = df[df["label"].between(1, 6)]
     print(f"総レース数: {len(df)}")
 
+    # 突合は train/valid に分ける前に済ませる(後だと分割済みDataFrameに反映されない)
+    if args.v8:
+        features = FEATURES_V8
+        df = merge_exhibition(df, BASE_DIR / args.exhibition)
+        print("※ スタート展示(展示ST・進入コース)を特徴量に追加して学習する")
+    elif args.drop_st:
+        features = FEATURES_NO_ST
+        print("※ st_i(本番STによる漏洩特徴量)を除外して学習する")
+    else:
+        features = FEATURES
+
     df = df.sort_values("date")
     dates = df["date"].unique()
     if len(dates) <= args.valid_days:
@@ -119,10 +183,6 @@ def main():
     valid_df = df[df["date"] >= cutoff_date]
     print(f"学習: {len(train_df)}件 ({train_df['date'].min()}〜{train_df['date'].max()})")
     print(f"検証: {len(valid_df)}件 ({valid_df['date'].min()}〜{valid_df['date'].max()}) [直近{args.valid_days}日をホールドアウト]")
-
-    features = FEATURES_NO_ST if args.drop_st else FEATURES
-    if args.drop_st:
-        print("※ st_i(本番STによる漏洩特徴量)を除外して学習する")
 
     X_train = build_features(train_df.reset_index(drop=True), features)
     X_valid = build_features(valid_df.reset_index(drop=True), features)
