@@ -31,3 +31,4 @@ pred_tmp.csv
 # 展示データ収集の生成物(大きいのでコミットしない)
 exhibition_data.csv
 exhibition_fetch.log
+odds_fetch.log

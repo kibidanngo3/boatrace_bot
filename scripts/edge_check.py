@@ -18,7 +18,9 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from scripts.train_model import build_features, FEATURES, FEATURES_NO_ST  # noqa: E402
+from scripts.train_model import (  # noqa: E402
+    build_features, merge_exhibition, FEATURES, FEATURES_NO_ST, FEATURES_V8,
+)
 from scripts.nige_vs_jump import ALL_120, race_ticket_probs, ORDER  # noqa: E402
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -29,9 +31,10 @@ def main():
     parser.add_argument("--model", default="final_model_v7.pkl")
     parser.add_argument("--order-suffix", default="v7")
     parser.add_argument("--drop-st", action="store_true")
+    parser.add_argument("--v8", action="store_true", help="スタート展示を使うモデル")
     args = parser.parse_args()
 
-    features = FEATURES_NO_ST if args.drop_st else FEATURES
+    features = FEATURES_V8 if args.v8 else (FEATURES_NO_ST if args.drop_st else FEATURES)
     model = pickle.load(open(BASE_DIR / args.model, "rb"))
     ORDER["2nd"] = pickle.load(open(BASE_DIR / f"order_model_2nd_{args.order_suffix}.pkl", "rb"))
     ORDER["3rd"] = pickle.load(open(BASE_DIR / f"order_model_3rd_{args.order_suffix}.pkl", "rb"))
@@ -43,7 +46,12 @@ def main():
         rows = [r for r in csv.DictReader(f)
                 if (r["date"], r["course"], str(int(r["rno"]))) in cache]
 
-    X = build_features(pd.DataFrame(rows), features)
+    df = pd.DataFrame(rows)
+    if args.v8:
+        df = merge_exhibition(df, BASE_DIR / "exhibition_data.csv")
+        rows = df.to_dict("records")  # 突合で行が落ちるので rows を作り直して整合させる
+
+    X = build_features(df, features)
     all_probs = model.predict(X)
     print(f"対象: {len(rows)}レース ({min(r['date'] for r in rows)}〜{max(r['date'] for r in rows)})\n")
 

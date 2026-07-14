@@ -18,7 +18,9 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from scripts.train_model import build_features, FEATURES, FEATURES_NO_ST  # noqa: E402
+from scripts.train_model import (  # noqa: E402
+    build_features, merge_exhibition, FEATURES, FEATURES_NO_ST, FEATURES_V8,
+)
 from main import (  # noqa: E402
     add_kelly_stakes,
     MIN_EXPECTED_VALUE, KELLY_FRACTION, STARTING_BANKROLL,
@@ -151,9 +153,10 @@ def main():
     parser.add_argument("--order-suffix", default="v1")
     parser.add_argument("--drop-st", action="store_true",
                         help="st_i を除いた特徴量で推論する(漏洩なしモデル用)")
+    parser.add_argument("--v8", action="store_true", help="スタート展示を使うモデル")
     args = parser.parse_args()
 
-    features = FEATURES_NO_ST if args.drop_st else FEATURES
+    features = FEATURES_V8 if args.v8 else (FEATURES_NO_ST if args.drop_st else FEATURES)
     leak = "st_除外(漏洩なし)" if args.drop_st else "st_あり(漏洩)"
     print(f"モデル: {args.model} / 着順モデル: {args.order_suffix} / 特徴量: {leak}\n")
 
@@ -174,6 +177,10 @@ def main():
     print(f"期間: {min(r['date'] for r in rows)} 〜 {max(r['date'] for r in rows)}\n")
 
     df = pd.DataFrame(rows)
+    if args.v8:
+        df = merge_exhibition(df, BASE_DIR / "exhibition_data.csv")
+        rows = df.to_dict("records")  # 突合で行が落ちるので rows を作り直して整合させる
+
     X = build_features(df, features)
     all_probs = model.predict(X)
 
