@@ -34,3 +34,5 @@ exhibition_fetch.log
 odds_fetch.log
 odds_train_cache.csv
 odds_drift_samples.csv
+oof_ticket_probs.npz
+oof.log
