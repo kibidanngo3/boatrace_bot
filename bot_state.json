@@ -1,1 +1,1 @@
-{"current_bankroll": 10000, "day_start_bankroll": 10000, "bankroll_day": "20260803", "notified_model_version": "final_model_v7.pkl", "consecutive_schedule_failures": 0, "last_schedule_alert_count": 0, "health_last_bet_at": "2026-08-03T18:19:49.131699+09:00", "health_prediction_rows": 0}
+{"current_bankroll": 10000, "day_start_bankroll": 10000, "bankroll_day": "20260803", "notified_model_version": "final_model_v7.pkl", "consecutive_schedule_failures": 0, "last_schedule_alert_count": 0, "health_last_bet_at": "2026-08-03T19:18:52.900795+09:00", "health_prediction_rows": 1}
