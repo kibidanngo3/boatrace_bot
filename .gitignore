@@ -8,6 +8,7 @@ venv/
 notified_races.log
 predictions.csv
 bot_state.json
+cross_market_live_odds.csv
 
 training_data*.csv
 backtest_checkpoint*.csv
@@ -34,5 +35,6 @@ exhibition_fetch.log
 odds_fetch.log
 odds_train_cache.csv
 odds_drift_samples.csv
+odds_cross_cache.csv
 oof_ticket_probs.npz
 oof.log

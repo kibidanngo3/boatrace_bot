@@ -43,6 +43,9 @@ CONFIG_PATH = BASE_DIR / "model_config_v7.pkl"
 LOG_FILE = BASE_DIR / "notified_races.log"
 PREDICTION_LOG_FILE = BASE_DIR / "predictions.csv"
 STATE_FILE = BASE_DIR / "bot_state.json"
+# 単勝×3連単プール間裁定の検証用ログ(CROSS_MARKET_REPORT.md参照)。賭け判断には使わない観測目的のみ。
+CROSS_MARKET_LOG_FILE = BASE_DIR / "cross_market_live_odds.csv"
+CROSS_MARKET_LOG_FIELDS = ["date", "course", "rno", "deadline", "run_at", "minutes_before", "odds3t_json", "tan_json"]
 STAKE_PER_TICKET = 100  # 舟券の購入単位 (100円単位) / ケリー計算後の丸め単位
 NOTIFIED_LOG_KEEP_DAYS = 2
 OPERATING_HOUR_START = 7   # 07:00 JST (モーニング競走を考慮)
@@ -212,6 +215,32 @@ def save_prediction_log(race_id, race, result, run_at, discord_message_id=None):
         if not file_exists:
             writer.writeheader()
         writer.writerow(row)
+
+def log_cross_market_odds(scraper, course, rno, date_str, deadline, run_at, minutes_before):
+    """単勝×3連単プール間の乖離(diff)検証用に、暫定オッズを記録する(CROSS_MARKET_REPORT.md参照)。
+
+    戦略フィルタ(イン飛び率など)より前、走査対象になった全レースに対して呼ぶこと。
+    賭け判断には一切使わない観測ログであり、失敗しても本処理は継続する。
+    """
+    try:
+        odds3t = scraper.fetch_odds3t(course, rno, date_str)
+        tan = scraper.fetch_odds_tan(course, rno, date_str)
+        if not odds3t or len(tan) != 6:
+            return
+        row = {
+            "date": date_str, "course": course, "rno": rno,
+            "deadline": deadline, "run_at": run_at.isoformat(),
+            "minutes_before": round(minutes_before, 1),
+            "odds3t_json": json.dumps(odds3t), "tan_json": json.dumps(tan),
+        }
+        file_exists = CROSS_MARKET_LOG_FILE.exists()
+        with open(CROSS_MARKET_LOG_FILE, "a", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=CROSS_MARKET_LOG_FIELDS)
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow(row)
+    except Exception as e:
+        print(f"  ⚠️ cross-market odds log failed: {course} {rno}R - {e}")
 
 def normalize_prediction_log_header():
     if not PREDICTION_LOG_FILE.exists():
@@ -1062,6 +1091,42 @@ class BoatRaceScraperV5:
         m = re.search(r"[1-6]", cell.get_text(strip=True))
         return int(m.group(0)) if m else None
 
+    def fetch_odds_tan(self, course, rno, date_str):
+        """単勝オッズを {"1": 4.5, ...} の形で取得する。
+
+        単勝プールと3連単プールの間の価格整合性を検証するための観測用
+        (CROSS_MARKET_REPORT.md参照)。賭け判断には使わない。
+        """
+        jcd = self.COURSE_MAP.get(course, "01")
+        url = f"https://www.boatrace.jp/owpc/pc/race/oddstf?rno={rno}&jcd={jcd}&hd={date_str}"
+        try:
+            soup = self._get_soup(url, referer=f"{self.INDEX_URL}?hd={date_str}")
+            if not soup or "データがありません" in soup.text:
+                return {}
+            tan = {}
+            for table in soup.select("table"):
+                cls = table.get("class") or []
+                if "is-w495" not in cls:
+                    continue
+                heading = table.find_previous("h3")
+                if heading and "複勝" in heading.get_text():
+                    continue
+                for row in table.select("tbody tr"):
+                    boat_cell = row.select_one("td.is-fBold")
+                    odd_cell = row.select_one("td.oddsPoint")
+                    if not boat_cell or not odd_cell:
+                        continue
+                    m = re.search(r"[1-6]", boat_cell.get_text(strip=True))
+                    if not m:
+                        continue
+                    odd = self._to_float(odd_cell.get_text(strip=True))
+                    if odd > 0:
+                        tan[m.group(0)] = odd
+            return tan
+        except Exception as e:
+            print(f"  ❌ fetch_odds_tan error: {course} {rno}R - {e}")
+            return {}
+
     def fetch_race_result(self, course, rno, date_str):
         """3連単の確定結果を {ticket, payout} で取得する。"""
         jcd = self.COURSE_MAP.get(course, "01")
@@ -1436,6 +1501,14 @@ def scan_and_notify(model, config, scraper, now_jst, date_str, run_at, state):
         course = race['course']
         rno = race['rno']
         race_id = race['id']
+
+        # プール間裁定の検証用ログ(戦略フィルタより前、賭け判断には使わない)
+        try:
+            race_dt = datetime.strptime(f"{date_str} {race['time']}", "%Y%m%d %H:%M").replace(tzinfo=JST)
+            minutes_before = (race_dt - now_jst).total_seconds() / 60
+            log_cross_market_odds(scraper, course, rno, date_str, race['time'], now_jst, minutes_before)
+        except Exception as e:
+            print(f"  ⚠️ cross-market log skipped: {course} {rno}R - {e}")
 
         print(f"  - {course} {rno}R: Analyzing... (Deadline: {race['time']})")
         res, status = predict_single(model, config, scraper, course, rno, date_str, bankroll, kelly_fraction=kelly_fraction, race_url=race['url'], deadline=race['time'])
