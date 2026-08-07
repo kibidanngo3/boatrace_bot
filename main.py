@@ -233,10 +233,12 @@ def log_cross_market_odds(scraper, course, rno, date_str, deadline, run_at, minu
             "minutes_before": round(minutes_before, 1),
             "odds3t_json": json.dumps(odds3t), "tan_json": json.dumps(tan),
         }
-        file_exists = CROSS_MARKET_LOG_FILE.exists()
+        # restoreステップの `git show ... > file` は初回(bot-state未作成)でも空ファイルを
+        # 作ってしまうため、.exists() だけではヘッダー未書き込みを検出できない。サイズで判定する。
+        has_header = CROSS_MARKET_LOG_FILE.exists() and CROSS_MARKET_LOG_FILE.stat().st_size > 0
         with open(CROSS_MARKET_LOG_FILE, "a", newline="", encoding="utf-8-sig") as f:
             writer = csv.DictWriter(f, fieldnames=CROSS_MARKET_LOG_FIELDS)
-            if not file_exists:
+            if not has_header:
                 writer.writeheader()
             writer.writerow(row)
     except Exception as e:
