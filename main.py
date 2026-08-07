@@ -6,9 +6,11 @@ import numpy as np
 import pickle
 import re
 import requests
+import threading
 import time
 import traceback
 from bs4 import BeautifulSoup
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
@@ -48,9 +50,21 @@ CROSS_MARKET_LOG_FILE = BASE_DIR / "cross_market_live_odds.csv"
 CROSS_MARKET_LOG_FIELDS = ["date", "course", "rno", "deadline", "run_at", "minutes_before", "odds3t_json", "tan_json"]
 # 上記が書けなかった原因を追える簡易デバッグログ(GitHub Actionsのコンソール出力は認証なしで見えないため)
 CROSS_MARKET_DEBUG_LOG = BASE_DIR / "cross_market_debug.log"
-# 観測ログに費やしてよい時間の上限(秒)。1レースあたり実測15〜20秒(odds3t+tan の2リクエスト)かかるため、
-# 対象レースが多いサイクルで本来の予想処理(timeout-minutes: 10)を圧迫しないよう先に予算で打ち切る。
+# 観測ログに費やしてよい時間の上限(秒)。並列化しているので通常はここまで届かないはずだが、
+# ネットワーク遅延など不測の事態で本来の予想処理(timeout-minutes: 10)を圧迫しないための安全弁。
 CROSS_MARKET_LOG_TIME_BUDGET_SEC = 120
+CROSS_MARKET_LOG_WORKERS = 6  # boatrace.jpへの同時アクセスを抑えめにする
+
+# requests.Session はスレッド間で共有すると安全性が怪しいため、fetch_cross_odds.py と同じく
+# スレッドごとに専用のスクレイパーインスタンスを持たせる。
+_cross_market_thread_local = threading.local()
+_cross_market_log_lock = threading.Lock()
+
+
+def _get_cross_market_scraper():
+    if not hasattr(_cross_market_thread_local, "scraper"):
+        _cross_market_thread_local.scraper = BoatRaceScraperV5()
+    return _cross_market_thread_local.scraper
 STAKE_PER_TICKET = 100  # 舟券の購入単位 (100円単位) / ケリー計算後の丸め単位
 NOTIFIED_LOG_KEEP_DAYS = 2
 OPERATING_HOUR_START = 7   # 07:00 JST (モーニング競走を考慮)
@@ -229,12 +243,14 @@ def log_cross_market_odds(scraper, course, rno, date_str, deadline, run_at, minu
     """
     def _debug(msg):
         try:
-            with open(CROSS_MARKET_DEBUG_LOG, "a", encoding="utf-8") as f:
-                f.write(f"{run_at.isoformat()} {course} {rno}R {msg}\n")
+            with _cross_market_log_lock:
+                with open(CROSS_MARKET_DEBUG_LOG, "a", encoding="utf-8") as f:
+                    f.write(f"{run_at.isoformat()} {course} {rno}R {msg}\n")
         except Exception:
             pass
 
     try:
+        # 並列実行される想定のため、ここより上(HTTPフェッチ)はロックを取らない。
         odds3t = scraper.fetch_odds3t(course, rno, date_str)
         tan = scraper.fetch_odds_tan(course, rno, date_str)
         if not odds3t or len(tan) != 6:
@@ -246,14 +262,15 @@ def log_cross_market_odds(scraper, course, rno, date_str, deadline, run_at, minu
             "minutes_before": round(minutes_before, 1),
             "odds3t_json": json.dumps(odds3t), "tan_json": json.dumps(tan),
         }
-        # restoreステップの `git show ... > file` は初回(bot-state未作成)でも空ファイルを
-        # 作ってしまうため、.exists() だけではヘッダー未書き込みを検出できない。サイズで判定する。
-        has_header = CROSS_MARKET_LOG_FILE.exists() and CROSS_MARKET_LOG_FILE.stat().st_size > 0
-        with open(CROSS_MARKET_LOG_FILE, "a", newline="", encoding="utf-8-sig") as f:
-            writer = csv.DictWriter(f, fieldnames=CROSS_MARKET_LOG_FIELDS)
-            if not has_header:
-                writer.writeheader()
-            writer.writerow(row)
+        with _cross_market_log_lock:
+            # restoreステップの `git show ... > file` は初回(bot-state未作成)でも空ファイルを
+            # 作ってしまうため、.exists() だけではヘッダー未書き込みを検出できない。サイズで判定する。
+            has_header = CROSS_MARKET_LOG_FILE.exists() and CROSS_MARKET_LOG_FILE.stat().st_size > 0
+            with open(CROSS_MARKET_LOG_FILE, "a", newline="", encoding="utf-8-sig") as f:
+                writer = csv.DictWriter(f, fieldnames=CROSS_MARKET_LOG_FIELDS)
+                if not has_header:
+                    writer.writeheader()
+                writer.writerow(row)
         _debug("ok")
     except Exception as e:
         print(f"  ⚠️ cross-market odds log failed: {course} {rno}R - {e}")
@@ -1514,26 +1531,35 @@ def scan_and_notify(model, config, scraper, now_jst, date_str, run_at, state):
     if not targets:
         print("  (No new target races in the 5-35 min window)")
 
-    cross_market_log_start = time.time()
-    cross_market_log_budget_exceeded = False
+    # プール間裁定の検証用ログ(戦略フィルタより前、賭け判断には使わない)。
+    # 1レースあたり実測15〜20秒かかるため、対象が多いサイクルで直列に回すと
+    # 本来の予想処理(timeout-minutes: 10)を圧迫する。並列に先読みしてから本ループに入る。
+    if targets:
+        cross_market_log_start = time.time()
+        with ThreadPoolExecutor(max_workers=CROSS_MARKET_LOG_WORKERS) as ex:
+            futures = []
+            for race in targets:
+                try:
+                    race_dt = datetime.strptime(f"{date_str} {race['time']}", "%Y%m%d %H:%M").replace(tzinfo=JST)
+                    minutes_before = (race_dt - now_jst).total_seconds() / 60
+                except Exception as e:
+                    print(f"  ⚠️ cross-market log skipped: {race['course']} {race['rno']}R - {e}")
+                    continue
+                futures.append(ex.submit(
+                    log_cross_market_odds, _get_cross_market_scraper(),
+                    race['course'], race['rno'], date_str, race['time'], now_jst, minutes_before,
+                ))
+            try:
+                for fut in as_completed(futures, timeout=CROSS_MARKET_LOG_TIME_BUDGET_SEC):
+                    fut.result()
+            except FuturesTimeoutError:
+                print(f"  ⏱️ cross-market log time budget ({CROSS_MARKET_LOG_TIME_BUDGET_SEC}s) exceeded; some targets may be unlogged this cycle")
+        print(f"  (cross-market log: {len(targets)}件を並列取得, {time.time() - cross_market_log_start:.1f}秒)")
 
     for race in targets:
         course = race['course']
         rno = race['rno']
         race_id = race['id']
-
-        # プール間裁定の検証用ログ(戦略フィルタより前、賭け判断には使わない)。
-        # 対象が多いサイクルでは時間予算を優先し、超えたら本来の予想処理を止めない。
-        if time.time() - cross_market_log_start < CROSS_MARKET_LOG_TIME_BUDGET_SEC:
-            try:
-                race_dt = datetime.strptime(f"{date_str} {race['time']}", "%Y%m%d %H:%M").replace(tzinfo=JST)
-                minutes_before = (race_dt - now_jst).total_seconds() / 60
-                log_cross_market_odds(scraper, course, rno, date_str, race['time'], now_jst, minutes_before)
-            except Exception as e:
-                print(f"  ⚠️ cross-market log skipped: {course} {rno}R - {e}")
-        elif not cross_market_log_budget_exceeded:
-            cross_market_log_budget_exceeded = True
-            print(f"  ⏱️ cross-market log time budget ({CROSS_MARKET_LOG_TIME_BUDGET_SEC}s) exceeded, skipping remaining targets this cycle")
 
         print(f"  - {course} {rno}R: Analyzing... (Deadline: {race['time']})")
         res, status = predict_single(model, config, scraper, course, rno, date_str, bankroll, kelly_fraction=kelly_fraction, race_url=race['url'], deadline=race['time'])
