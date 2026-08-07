@@ -48,6 +48,9 @@ CROSS_MARKET_LOG_FILE = BASE_DIR / "cross_market_live_odds.csv"
 CROSS_MARKET_LOG_FIELDS = ["date", "course", "rno", "deadline", "run_at", "minutes_before", "odds3t_json", "tan_json"]
 # 上記が書けなかった原因を追える簡易デバッグログ(GitHub Actionsのコンソール出力は認証なしで見えないため)
 CROSS_MARKET_DEBUG_LOG = BASE_DIR / "cross_market_debug.log"
+# 観測ログに費やしてよい時間の上限(秒)。1レースあたり実測15〜20秒(odds3t+tan の2リクエスト)かかるため、
+# 対象レースが多いサイクルで本来の予想処理(timeout-minutes: 10)を圧迫しないよう先に予算で打ち切る。
+CROSS_MARKET_LOG_TIME_BUDGET_SEC = 120
 STAKE_PER_TICKET = 100  # 舟券の購入単位 (100円単位) / ケリー計算後の丸め単位
 NOTIFIED_LOG_KEEP_DAYS = 2
 OPERATING_HOUR_START = 7   # 07:00 JST (モーニング競走を考慮)
@@ -1511,18 +1514,26 @@ def scan_and_notify(model, config, scraper, now_jst, date_str, run_at, state):
     if not targets:
         print("  (No new target races in the 5-35 min window)")
 
+    cross_market_log_start = time.time()
+    cross_market_log_budget_exceeded = False
+
     for race in targets:
         course = race['course']
         rno = race['rno']
         race_id = race['id']
 
-        # プール間裁定の検証用ログ(戦略フィルタより前、賭け判断には使わない)
-        try:
-            race_dt = datetime.strptime(f"{date_str} {race['time']}", "%Y%m%d %H:%M").replace(tzinfo=JST)
-            minutes_before = (race_dt - now_jst).total_seconds() / 60
-            log_cross_market_odds(scraper, course, rno, date_str, race['time'], now_jst, minutes_before)
-        except Exception as e:
-            print(f"  ⚠️ cross-market log skipped: {course} {rno}R - {e}")
+        # プール間裁定の検証用ログ(戦略フィルタより前、賭け判断には使わない)。
+        # 対象が多いサイクルでは時間予算を優先し、超えたら本来の予想処理を止めない。
+        if time.time() - cross_market_log_start < CROSS_MARKET_LOG_TIME_BUDGET_SEC:
+            try:
+                race_dt = datetime.strptime(f"{date_str} {race['time']}", "%Y%m%d %H:%M").replace(tzinfo=JST)
+                minutes_before = (race_dt - now_jst).total_seconds() / 60
+                log_cross_market_odds(scraper, course, rno, date_str, race['time'], now_jst, minutes_before)
+            except Exception as e:
+                print(f"  ⚠️ cross-market log skipped: {course} {rno}R - {e}")
+        elif not cross_market_log_budget_exceeded:
+            cross_market_log_budget_exceeded = True
+            print(f"  ⏱️ cross-market log time budget ({CROSS_MARKET_LOG_TIME_BUDGET_SEC}s) exceeded, skipping remaining targets this cycle")
 
         print(f"  - {course} {rno}R: Analyzing... (Deadline: {race['time']})")
         res, status = predict_single(model, config, scraper, course, rno, date_str, bankroll, kelly_fraction=kelly_fraction, race_url=race['url'], deadline=race['time'])
