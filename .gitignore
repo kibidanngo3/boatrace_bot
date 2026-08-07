@@ -9,6 +9,7 @@ notified_races.log
 predictions.csv
 bot_state.json
 cross_market_live_odds.csv
+cross_market_debug.log
 
 training_data*.csv
 backtest_checkpoint*.csv

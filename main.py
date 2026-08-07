@@ -46,6 +46,8 @@ STATE_FILE = BASE_DIR / "bot_state.json"
 # 単勝×3連単プール間裁定の検証用ログ(CROSS_MARKET_REPORT.md参照)。賭け判断には使わない観測目的のみ。
 CROSS_MARKET_LOG_FILE = BASE_DIR / "cross_market_live_odds.csv"
 CROSS_MARKET_LOG_FIELDS = ["date", "course", "rno", "deadline", "run_at", "minutes_before", "odds3t_json", "tan_json"]
+# 上記が書けなかった原因を追える簡易デバッグログ(GitHub Actionsのコンソール出力は認証なしで見えないため)
+CROSS_MARKET_DEBUG_LOG = BASE_DIR / "cross_market_debug.log"
 STAKE_PER_TICKET = 100  # 舟券の購入単位 (100円単位) / ケリー計算後の丸め単位
 NOTIFIED_LOG_KEEP_DAYS = 2
 OPERATING_HOUR_START = 7   # 07:00 JST (モーニング競走を考慮)
@@ -222,10 +224,18 @@ def log_cross_market_odds(scraper, course, rno, date_str, deadline, run_at, minu
     戦略フィルタ(イン飛び率など)より前、走査対象になった全レースに対して呼ぶこと。
     賭け判断には一切使わない観測ログであり、失敗しても本処理は継続する。
     """
+    def _debug(msg):
+        try:
+            with open(CROSS_MARKET_DEBUG_LOG, "a", encoding="utf-8") as f:
+                f.write(f"{run_at.isoformat()} {course} {rno}R {msg}\n")
+        except Exception:
+            pass
+
     try:
         odds3t = scraper.fetch_odds3t(course, rno, date_str)
         tan = scraper.fetch_odds_tan(course, rno, date_str)
         if not odds3t or len(tan) != 6:
+            _debug(f"skip: odds3t={len(odds3t)}件 tan={len(tan)}件")
             return
         row = {
             "date": date_str, "course": course, "rno": rno,
@@ -241,8 +251,10 @@ def log_cross_market_odds(scraper, course, rno, date_str, deadline, run_at, minu
             if not has_header:
                 writer.writeheader()
             writer.writerow(row)
+        _debug("ok")
     except Exception as e:
         print(f"  ⚠️ cross-market odds log failed: {course} {rno}R - {e}")
+        _debug(f"exception: {e}")
 
 def normalize_prediction_log_header():
     if not PREDICTION_LOG_FILE.exists():
