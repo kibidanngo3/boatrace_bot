@@ -46,14 +46,21 @@ LOG_FILE = BASE_DIR / "notified_races.log"
 PREDICTION_LOG_FILE = BASE_DIR / "predictions.csv"
 STATE_FILE = BASE_DIR / "bot_state.json"
 # 単勝×3連単プール間裁定の検証用ログ(CROSS_MARKET_REPORT.md参照)。賭け判断には使わない観測目的のみ。
-CROSS_MARKET_LOG_FILE = BASE_DIR / "cross_market_live_odds.csv"
-CROSS_MARKET_LOG_FIELDS = ["date", "course", "rno", "deadline", "run_at", "minutes_before", "odds3t_json", "tan_json"]
+# v2で2連複・複勝を追加(単勝×3連単だけでなく複勝×2連複の乖離も検証するため、CROSS_MARKET_REPORT.md参照)。
+# 旧cross_market_live_odds.csv(単勝・3連単のみ)とは列が違うため、別名にして無効な行が混ざらないようにする。
+CROSS_MARKET_LOG_FILE = BASE_DIR / "cross_market_live_odds_v2.csv"
+CROSS_MARKET_LOG_FIELDS = [
+    "date", "course", "rno", "deadline", "run_at", "minutes_before",
+    "odds3t_json", "tan_json", "fuku_json", "odds2f_json",
+]
 # 上記が書けなかった原因を追える簡易デバッグログ(GitHub Actionsのコンソール出力は認証なしで見えないため)
 CROSS_MARKET_DEBUG_LOG = BASE_DIR / "cross_market_debug.log"
 # 観測ログに費やしてよい時間の上限(秒)。並列化しているので通常はここまで届かないはずだが、
 # ネットワーク遅延など不測の事態で本来の予想処理(timeout-minutes: 10)を圧迫しないための安全弁。
 # 単勝が薄くて不完全なレースは25秒リトライが乗るため、ある程度余裕を持たせてある。
-CROSS_MARKET_LOG_TIME_BUDGET_SEC = 240
+# v2で1レースあたりのフェッチが2種(odds3t+oddstf)から3種(odds3t+oddstf+odds2tf)に増えたため、
+# 予算にも余裕を持たせる。
+CROSS_MARKET_LOG_TIME_BUDGET_SEC = 300
 CROSS_MARKET_LOG_WORKERS = 6  # boatrace.jpへの同時アクセスを抑えめにする
 # 観測ログは賭け判断の窓(5〜35分前)より広く取り、1レースあたりのスキャン機会を増やす。
 CROSS_MARKET_LOG_MIN_MINUTES = 2
@@ -240,7 +247,7 @@ def save_prediction_log(race_id, race, result, run_at, discord_message_id=None):
         writer.writerow(row)
 
 def log_cross_market_odds(scraper, course, rno, date_str, deadline, run_at, minutes_before):
-    """単勝×3連単プール間の乖離(diff)検証用に、暫定オッズを記録する(CROSS_MARKET_REPORT.md参照)。
+    """単勝×3連単・複勝×2連複のプール間乖離(diff)検証用に、暫定オッズを記録する(CROSS_MARKET_REPORT.md参照)。
 
     戦略フィルタ(イン飛び率など)より前、走査対象になった全レースに対して呼ぶこと。
     賭け判断には一切使わない観測ログであり、失敗しても本処理は継続する。
@@ -253,25 +260,33 @@ def log_cross_market_odds(scraper, course, rno, date_str, deadline, run_at, minu
         except Exception:
             pass
 
+    def _complete(odds3t, tan, fuku, odds2f):
+        return bool(odds3t) and len(tan) == 6 and len(fuku) == 6 and len(odds2f) == 15
+
     try:
         # 並列実行される想定のため、ここより上(HTTPフェッチ)はロックを取らない。
         odds3t = scraper.fetch_odds3t(course, rno, date_str)
-        tan = scraper.fetch_odds_tan(course, rno, date_str)
-        # 単勝は資金が薄い艇のオッズが一時的に0.0(未計算)で返ることがある。3連単は毎回フルで
-        # 取れているので、単勝側だけ少し待ってもう一度だけ試す(市場が薄いだけなら数十秒で埋まりうる)。
+        tan, fuku = scraper.fetch_odds_tan_fuku(course, rno, date_str)
+        odds2f = scraper.fetch_odds_2f(course, rno, date_str)
+        # 資金が薄い艇/組み合わせは一時的にオッズが0.0(未計算)で返ることがある。3連単は毎回フルで
+        # 取れているので、それ以外だけ少し待ってもう一度だけ試す(市場が薄いだけなら数十秒で埋まりうる)。
         retried = False
-        if odds3t and len(tan) != 6:
+        if odds3t and not _complete(odds3t, tan, fuku, odds2f):
             time.sleep(25)
-            tan = scraper.fetch_odds_tan(course, rno, date_str)
+            if len(tan) != 6 or len(fuku) != 6:
+                tan, fuku = scraper.fetch_odds_tan_fuku(course, rno, date_str)
+            if len(odds2f) != 15:
+                odds2f = scraper.fetch_odds_2f(course, rno, date_str)
             retried = True
-        if not odds3t or len(tan) != 6:
-            _debug(f"skip: odds3t={len(odds3t)}件 tan={len(tan)}件 retried={retried}")
+        if not _complete(odds3t, tan, fuku, odds2f):
+            _debug(f"skip: odds3t={len(odds3t)}件 tan={len(tan)}件 fuku={len(fuku)}件 odds2f={len(odds2f)}件 retried={retried}")
             return
         row = {
             "date": date_str, "course": course, "rno": rno,
             "deadline": deadline, "run_at": run_at.isoformat(),
             "minutes_before": round(minutes_before, 1),
             "odds3t_json": json.dumps(odds3t), "tan_json": json.dumps(tan),
+            "fuku_json": json.dumps(fuku), "odds2f_json": json.dumps(odds2f),
         }
         with _cross_market_log_lock:
             # restoreステップの `git show ... > file` は初回(bot-state未作成)でも空ファイルを
@@ -1136,26 +1151,24 @@ class BoatRaceScraperV5:
         m = re.search(r"[1-6]", cell.get_text(strip=True))
         return int(m.group(0)) if m else None
 
-    def fetch_odds_tan(self, course, rno, date_str):
-        """単勝オッズを {"1": 4.5, ...} の形で取得する。
+    def fetch_odds_tan_fuku(self, course, rno, date_str):
+        """単勝・複勝オッズを取得する。戻り値: ({"1": 4.5,...}, {"1": [1.8,5.7],...})
 
-        単勝プールと3連単プールの間の価格整合性を検証するための観測用
-        (CROSS_MARKET_REPORT.md参照)。賭け判断には使わない。
+        プール間の価格整合性を検証するための観測用(CROSS_MARKET_REPORT.md参照)。賭け判断には使わない。
         """
         jcd = self.COURSE_MAP.get(course, "01")
         url = f"https://www.boatrace.jp/owpc/pc/race/oddstf?rno={rno}&jcd={jcd}&hd={date_str}"
         try:
             soup = self._get_soup(url, referer=f"{self.INDEX_URL}?hd={date_str}")
             if not soup or "データがありません" in soup.text:
-                return {}
-            tan = {}
+                return {}, {}
+            tan, fuku = {}, {}
             for table in soup.select("table"):
                 cls = table.get("class") or []
                 if "is-w495" not in cls:
                     continue
                 heading = table.find_previous("h3")
-                if heading and "複勝" in heading.get_text():
-                    continue
+                is_fuku = heading and "複勝" in heading.get_text()
                 for row in table.select("tbody tr"):
                     boat_cell = row.select_one("td.is-fBold")
                     odd_cell = row.select_one("td.oddsPoint")
@@ -1164,12 +1177,61 @@ class BoatRaceScraperV5:
                     m = re.search(r"[1-6]", boat_cell.get_text(strip=True))
                     if not m:
                         continue
-                    odd = self._to_float(odd_cell.get_text(strip=True))
-                    if odd > 0:
-                        tan[m.group(0)] = odd
-            return tan
+                    text = odd_cell.get_text(strip=True)
+                    if is_fuku:
+                        nums = re.findall(r"\d+(?:\.\d+)?", text)
+                        if len(nums) >= 2:
+                            fuku[m.group(0)] = [float(nums[0]), float(nums[1])]
+                    else:
+                        odd = self._to_float(text)
+                        if odd > 0:
+                            tan[m.group(0)] = odd
+            return tan, fuku
         except Exception as e:
-            print(f"  ❌ fetch_odds_tan error: {course} {rno}R - {e}")
+            print(f"  ❌ fetch_odds_tan_fuku error: {course} {rno}R - {e}")
+            return {}, {}
+
+    def fetch_odds_2f(self, course, rno, date_str):
+        """2連複オッズを {"1-2": 7.0, ...} の形で取得する(艇番は昇順に正規化)。
+
+        プール間の価格整合性を検証するための観測用(CROSS_MARKET_REPORT.md参照)。賭け判断には使わない。
+        """
+        jcd = self.COURSE_MAP.get(course, "01")
+        url = f"https://www.boatrace.jp/owpc/pc/race/odds2tf?rno={rno}&jcd={jcd}&hd={date_str}"
+        try:
+            soup = self._get_soup(url, referer=f"{self.INDEX_URL}?hd={date_str}")
+            if not soup or "データがありません" in soup.text:
+                return {}
+            h = next((h for h in soup.select("h3") if "2連複オッズ" in h.get_text()), None)
+            if not h:
+                return {}
+            table = h.find_next("table")
+            if not table:
+                return {}
+            header_ths = table.select("thead th")
+            first_boats = [int(t.get_text(strip=True)) for t in header_ths if re.fullmatch(r"[1-6]", t.get_text(strip=True))]
+            if len(first_boats) != 6:
+                first_boats = list(range(1, 7))
+
+            odds = {}
+            for row in table.select("tbody tr"):
+                cells = row.select("td")
+                pos = 0
+                for first in first_boats:
+                    if pos + 1 >= len(cells):
+                        break
+                    boat_cell, odd_cell = cells[pos], cells[pos + 1]
+                    pos += 2
+                    if "is-disabled" in (boat_cell.get("class") or []):
+                        continue
+                    second = self._cell_boat_number(boat_cell)
+                    odd = self._to_float(odd_cell.get_text(strip=True))
+                    if second and odd > 0:
+                        a, b = sorted([first, second])
+                        odds[f"{a}-{b}"] = odd
+            return odds
+        except Exception as e:
+            print(f"  ❌ fetch_odds_2f error: {course} {rno}R - {e}")
             return {}
 
     def fetch_race_result(self, course, rno, date_str):

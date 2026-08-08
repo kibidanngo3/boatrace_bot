@@ -45,7 +45,7 @@ jobs:
       - name: Restore bot state from bot-state branch
         run: |
           git fetch origin bot-state 2>/dev/null || echo "bot-state branch not found yet"
-          for f in predictions.csv notified_races.log bot_state.json cross_market_live_odds.csv cross_market_debug.log; do
+          for f in predictions.csv notified_races.log bot_state.json cross_market_live_odds.csv cross_market_live_odds_v2.csv cross_market_debug.log; do
             git show origin/bot-state:$f > "$f" 2>/dev/null && echo "  restored $f" || echo "  (no $f yet)"
           done
 
@@ -63,7 +63,7 @@ jobs:
       - name: Ensure state files
         if: always()
         run: |
-          touch predictions.csv notified_races.log bot_state.json cross_market_live_odds.csv cross_market_debug.log
+          touch predictions.csv notified_races.log bot_state.json cross_market_live_odds.csv cross_market_live_odds_v2.csv cross_market_debug.log
 
       - name: Save bot state to bot-state branch
         if: always()
@@ -76,11 +76,11 @@ jobs:
           else
             git worktree add state-worktree -B bot-state
           fi
-          for f in predictions.csv notified_races.log bot_state.json cross_market_live_odds.csv cross_market_debug.log; do
+          for f in predictions.csv notified_races.log bot_state.json cross_market_live_odds.csv cross_market_live_odds_v2.csv cross_market_debug.log; do
             [ -f "$f" ] && cp "$f" state-worktree/
           done
           cd state-worktree
-          git add -f predictions.csv notified_races.log bot_state.json cross_market_live_odds.csv cross_market_debug.log
+          git add -f predictions.csv notified_races.log bot_state.json cross_market_live_odds.csv cross_market_live_odds_v2.csv cross_market_debug.log
           if ! git diff --cached --quiet; then
             git commit -m "Update bot state"
             git push origin HEAD:bot-state
