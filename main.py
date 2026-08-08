@@ -52,8 +52,12 @@ CROSS_MARKET_LOG_FIELDS = ["date", "course", "rno", "deadline", "run_at", "minut
 CROSS_MARKET_DEBUG_LOG = BASE_DIR / "cross_market_debug.log"
 # 観測ログに費やしてよい時間の上限(秒)。並列化しているので通常はここまで届かないはずだが、
 # ネットワーク遅延など不測の事態で本来の予想処理(timeout-minutes: 10)を圧迫しないための安全弁。
-CROSS_MARKET_LOG_TIME_BUDGET_SEC = 120
+# 単勝が薄くて不完全なレースは25秒リトライが乗るため、ある程度余裕を持たせてある。
+CROSS_MARKET_LOG_TIME_BUDGET_SEC = 240
 CROSS_MARKET_LOG_WORKERS = 6  # boatrace.jpへの同時アクセスを抑えめにする
+# 観測ログは賭け判断の窓(5〜35分前)より広く取り、1レースあたりのスキャン機会を増やす。
+CROSS_MARKET_LOG_MIN_MINUTES = 2
+CROSS_MARKET_LOG_MAX_MINUTES = 45
 
 # requests.Session はスレッド間で共有すると安全性が怪しいため、fetch_cross_odds.py と同じく
 # スレッドごとに専用のスクレイパーインスタンスを持たせる。
@@ -253,8 +257,15 @@ def log_cross_market_odds(scraper, course, rno, date_str, deadline, run_at, minu
         # 並列実行される想定のため、ここより上(HTTPフェッチ)はロックを取らない。
         odds3t = scraper.fetch_odds3t(course, rno, date_str)
         tan = scraper.fetch_odds_tan(course, rno, date_str)
+        # 単勝は資金が薄い艇のオッズが一時的に0.0(未計算)で返ることがある。3連単は毎回フルで
+        # 取れているので、単勝側だけ少し待ってもう一度だけ試す(市場が薄いだけなら数十秒で埋まりうる)。
+        retried = False
+        if odds3t and len(tan) != 6:
+            time.sleep(25)
+            tan = scraper.fetch_odds_tan(course, rno, date_str)
+            retried = True
         if not odds3t or len(tan) != 6:
-            _debug(f"skip: odds3t={len(odds3t)}件 tan={len(tan)}件")
+            _debug(f"skip: odds3t={len(odds3t)}件 tan={len(tan)}件 retried={retried}")
             return
         row = {
             "date": date_str, "course": course, "rno": rno,
@@ -1512,6 +1523,10 @@ def scan_and_notify(model, config, scraper, now_jst, date_str, run_at, state):
 
     # 2. 現在のターゲット (5分〜35分前) を抽出
     targets = []
+    # プール間裁定の観測ログ用は賭け判断と無関係なので、もっと広い窓(2〜45分前)で拾う。
+    # 窓が広い分スキャン機会が増え(1レースあたり2回→3回程度)、単勝プールが薄くて
+    # スキップになった場合のリカバリ機会も増える。
+    cross_market_targets = []
     print(f"[{datetime.now(JST).strftime('%H:%M:%S')}] 🔍 Filtering targets from schedule...")
     for (course, rno), (time_str, race_url) in sorted(all_races.items(), key=lambda kv: (kv[1][0], kv[0])):
         try:
@@ -1522,11 +1537,11 @@ def scan_and_notify(model, config, scraper, now_jst, date_str, run_at, state):
             if 0 <= diff <= 45:
                 print(f"  - {course} {rno}R: {time_str} (in {diff:.1f}m)")
 
-            if 5 <= diff <= 35:
-                # 重複通知チェック
-                race_id = f"{date_str}_{course}_{rno}"
-                if not is_already_notified(race_id):
-                    targets.append({"course": course, "rno": rno, "time": time_str, "url": race_url, "id": race_id})
+            race_id = f"{date_str}_{course}_{rno}"
+            if 5 <= diff <= 35 and not is_already_notified(race_id):
+                targets.append({"course": course, "rno": rno, "time": time_str, "url": race_url, "id": race_id})
+            if CROSS_MARKET_LOG_MIN_MINUTES <= diff <= CROSS_MARKET_LOG_MAX_MINUTES and not is_already_notified(race_id):
+                cross_market_targets.append({"course": course, "rno": rno, "time": time_str, "url": race_url, "id": race_id})
         except Exception as e:
             print(f"  ⚠️ Failed to evaluate schedule item {course} {rno}R: {e}")
 
@@ -1537,11 +1552,12 @@ def scan_and_notify(model, config, scraper, now_jst, date_str, run_at, state):
     # プール間裁定の検証用ログ(戦略フィルタより前、賭け判断には使わない)。
     # 1レースあたり実測15〜20秒かかるため、対象が多いサイクルで直列に回すと
     # 本来の予想処理(timeout-minutes: 10)を圧迫する。並列に先読みしてから本ループに入る。
-    if targets:
+    if cross_market_targets:
+        targets_for_log = cross_market_targets
         cross_market_log_start = time.time()
         with ThreadPoolExecutor(max_workers=CROSS_MARKET_LOG_WORKERS) as ex:
             futures = []
-            for race in targets:
+            for race in targets_for_log:
                 try:
                     race_dt = datetime.strptime(f"{date_str} {race['time']}", "%Y%m%d %H:%M").replace(tzinfo=JST)
                     minutes_before = (race_dt - now_jst).total_seconds() / 60
@@ -1557,7 +1573,7 @@ def scan_and_notify(model, config, scraper, now_jst, date_str, run_at, state):
                     fut.result()
             except FuturesTimeoutError:
                 print(f"  ⏱️ cross-market log time budget ({CROSS_MARKET_LOG_TIME_BUDGET_SEC}s) exceeded; some targets may be unlogged this cycle")
-        print(f"  (cross-market log: {len(targets)}件を並列取得, {time.time() - cross_market_log_start:.1f}秒)")
+        print(f"  (cross-market log: {len(targets_for_log)}件を並列取得, {time.time() - cross_market_log_start:.1f}秒)")
 
     if daily_loss_limit_hit:
         return 0
