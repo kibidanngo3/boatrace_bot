@@ -1478,11 +1478,14 @@ def scan_and_notify(model, config, scraper, now_jst, date_str, run_at, state):
         return 0
 
     day_start_bankroll = state.get("day_start_bankroll", bankroll)
+    daily_loss_limit_hit = False
     if day_start_bankroll > 0:
         daily_loss_ratio = (day_start_bankroll - bankroll) / day_start_bankroll
         if daily_loss_ratio >= DAILY_LOSS_LIMIT_RATIO:
-            print(f"  🛑 Daily loss limit reached ({daily_loss_ratio:.1%} >= {DAILY_LOSS_LIMIT_RATIO:.0%}). Skipping for today.")
-            return 0
+            print(f"  🛑 Daily loss limit reached ({daily_loss_ratio:.1%} >= {DAILY_LOSS_LIMIT_RATIO:.0%}). No new bets today.")
+            # 新規ベットは止めるが、スケジュール取得とプール間裁定の観測ログ(賭け判断とは無関係)は
+            # 続ける。以前はここで即returnしており、損切り後は観測ログも巻き込んで丸一日止まっていた。
+            daily_loss_limit_hit = True
 
     kelly_fraction = KELLY_FRACTION
 
@@ -1555,6 +1558,9 @@ def scan_and_notify(model, config, scraper, now_jst, date_str, run_at, state):
             except FuturesTimeoutError:
                 print(f"  ⏱️ cross-market log time budget ({CROSS_MARKET_LOG_TIME_BUDGET_SEC}s) exceeded; some targets may be unlogged this cycle")
         print(f"  (cross-market log: {len(targets)}件を並列取得, {time.time() - cross_market_log_start:.1f}秒)")
+
+    if daily_loss_limit_hit:
+        return 0
 
     for race in targets:
         course = race['course']
