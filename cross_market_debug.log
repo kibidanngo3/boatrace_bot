@@ -99,3 +99,7 @@
 2026-08-09T08:31:03.460993+09:00 鳴門 2R skip: odds3t=104件 tan=1件 fuku=6件 odds2f=7件 retried=True
 2026-08-09T08:31:03.460993+09:00 唐津 2R skip: odds3t=120件 tan=2件 fuku=6件 odds2f=7件 retried=True
 2026-08-09T08:31:03.460993+09:00 三国 2R skip: odds3t=120件 tan=1件 fuku=6件 odds2f=8件 retried=True
+2026-08-09T08:46:02.494083+09:00 三国 2R ok
+2026-08-09T08:46:02.494083+09:00 唐津 2R skip: odds3t=120件 tan=2件 fuku=6件 odds2f=8件 retried=True
+2026-08-09T08:46:02.494083+09:00 鳴門 2R skip: odds3t=120件 tan=3件 fuku=6件 odds2f=12件 retried=True
+2026-08-09T08:46:02.494083+09:00 三国 3R skip: odds3t=119件 tan=1件 fuku=6件 odds2f=11件 retried=True
