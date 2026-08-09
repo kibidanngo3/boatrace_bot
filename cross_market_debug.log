@@ -313,3 +313,17 @@
 2026-08-09T13:31:00.496526+09:00 津 8R skip: odds3t=120件 tan=2件 fuku=6件 odds2f=13件 retried=True
 2026-08-09T13:31:00.496526+09:00 徳山 8R skip: odds3t=120件 tan=5件 fuku=6件 odds2f=15件 retried=True
 2026-08-09T13:31:00.496526+09:00 戸田 8R skip: odds3t=120件 tan=2件 fuku=6件 odds2f=15件 retried=True
+2026-08-09T13:45:56.764024+09:00 鳴門 11R ok
+2026-08-09T13:45:56.764024+09:00 唐津 11R ok
+2026-08-09T13:45:56.764024+09:00 三国 12R ok
+2026-08-09T13:45:56.764024+09:00 江戸川 7R skip: odds3t=120件 tan=5件 fuku=6件 odds2f=15件 retried=True
+2026-08-09T13:45:56.764024+09:00 児島 7R skip: odds3t=120件 tan=5件 fuku=6件 odds2f=14件 retried=True
+2026-08-09T13:45:56.764024+09:00 尼崎 8R skip: odds3t=120件 tan=5件 fuku=6件 odds2f=14件 retried=True
+2026-08-09T13:45:56.764024+09:00 津 8R skip: odds3t=120件 tan=3件 fuku=6件 odds2f=14件 retried=True
+2026-08-09T13:45:56.764024+09:00 多摩川 6R skip: odds3t=120件 tan=4件 fuku=6件 odds2f=14件 retried=True
+2026-08-09T13:45:56.764024+09:00 徳山 8R skip: odds3t=120件 tan=5件 fuku=6件 odds2f=15件 retried=True
+2026-08-09T13:45:56.764024+09:00 戸田 8R skip: odds3t=120件 tan=2件 fuku=6件 odds2f=15件 retried=True
+2026-08-09T13:45:56.764024+09:00 唐津 12R ok
+2026-08-09T13:45:56.764024+09:00 鳴門 12R skip: odds3t=120件 tan=4件 fuku=6件 odds2f=15件 retried=True
+2026-08-09T13:45:56.764024+09:00 児島 8R skip: odds3t=120件 tan=4件 fuku=6件 odds2f=14件 retried=True
+2026-08-09T13:45:56.764024+09:00 江戸川 8R skip: odds3t=120件 tan=2件 fuku=6件 odds2f=14件 retried=True
