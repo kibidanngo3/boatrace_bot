@@ -571,3 +571,8 @@
 2026-08-10T08:15:54.534256+09:00 唐津 1R skip: odds3t=120件 tan=2件 fuku=6件 odds2f=5件 retried=True
 2026-08-10T08:15:54.534256+09:00 芦屋 2R skip: odds3t=114件 tan=2件 fuku=6件 odds2f=5件 retried=True
 2026-08-10T08:15:54.534256+09:00 鳴門 1R skip: odds3t=120件 tan=2件 fuku=6件 odds2f=9件 retried=True
+2026-08-10T08:30:59.733473+09:00 鳴門 1R skip: odds3t=120件 tan=4件 fuku=6件 odds2f=14件 retried=True
+2026-08-10T08:30:59.733473+09:00 鳴門 2R skip: odds3t=98件 tan=1件 fuku=6件 odds2f=3件 retried=True
+2026-08-10T08:30:59.733473+09:00 唐津 2R skip: odds3t=117件 tan=3件 fuku=6件 odds2f=8件 retried=True
+2026-08-10T08:30:59.733473+09:00 芦屋 2R skip: odds3t=114件 tan=2件 fuku=6件 odds2f=5件 retried=True
+2026-08-10T08:30:59.733473+09:00 唐津 1R skip: odds3t=120件 tan=4件 fuku=6件 odds2f=11件 retried=True
