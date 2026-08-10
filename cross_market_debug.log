@@ -991,3 +991,8 @@
 2026-08-10T19:45:59.005633+09:00 大村 11R skip: odds3t=120件 tan=3件 fuku=6件 odds2f=15件 retried=True
 2026-08-10T19:45:59.005633+09:00 丸亀 12R skip: odds3t=120件 tan=4件 fuku=6件 odds2f=15件 retried=True
 2026-08-10T19:45:59.005633+09:00 若松 11R skip: odds3t=120件 tan=4件 fuku=6件 odds2f=15件 retried=True
+2026-08-10T20:01:20.368722+09:00 大村 12R ok
+2026-08-10T20:01:20.368722+09:00 若松 12R ok
+2026-08-10T20:01:20.368722+09:00 大村 11R ok
+2026-08-10T20:01:20.368722+09:00 丸亀 12R skip: odds3t=120件 tan=5件 fuku=6件 odds2f=15件 retried=True
+2026-08-10T20:01:20.368722+09:00 若松 11R skip: odds3t=120件 tan=4件 fuku=6件 odds2f=15件 retried=True
