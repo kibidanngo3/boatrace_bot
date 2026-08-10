@@ -62,6 +62,10 @@ CROSS_MARKET_DEBUG_LOG = BASE_DIR / "cross_market_debug.log"
 # 予算にも余裕を持たせる。
 CROSS_MARKET_LOG_TIME_BUDGET_SEC = 300
 CROSS_MARKET_LOG_WORKERS = 6  # boatrace.jpへの同時アクセスを抑えめにする
+# プール間裁定(単勝×3連単・複勝×2連複)は2026-08-11の検証で決着済み: シグナルは実在するが、
+# 締切までに市場が自己修正するため確定オッズでの決済では優位性が消える(CROSS_MARKET_REPORT.md 0章)。
+# 結論が出たので観測ログは停止する。コードは別の仮説検証に再利用できるよう残す。
+CROSS_MARKET_LOG_ENABLED = False
 # 観測ログは賭け判断の窓(5〜35分前)より広く取り、1レースあたりのスキャン機会を増やす。
 CROSS_MARKET_LOG_MIN_MINUTES = 2
 CROSS_MARKET_LOG_MAX_MINUTES = 45
@@ -1614,7 +1618,7 @@ def scan_and_notify(model, config, scraper, now_jst, date_str, run_at, state):
     # プール間裁定の検証用ログ(戦略フィルタより前、賭け判断には使わない)。
     # 1レースあたり実測15〜20秒かかるため、対象が多いサイクルで直列に回すと
     # 本来の予想処理(timeout-minutes: 10)を圧迫する。並列に先読みしてから本ループに入る。
-    if cross_market_targets:
+    if CROSS_MARKET_LOG_ENABLED and cross_market_targets:
         targets_for_log = cross_market_targets
         cross_market_log_start = time.time()
         with ThreadPoolExecutor(max_workers=CROSS_MARKET_LOG_WORKERS) as ex:
